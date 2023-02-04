@@ -1,0 +1,2 @@
+# klipper python virtual environment requirements for beacon
+numpy>=1.16.6
