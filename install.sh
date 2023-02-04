@@ -11,7 +11,7 @@ if [ ! -d "$KDIR" ] || [ ! -d "$KENV" ]; then
 fi
 
 # install beacon requirements to env
-"${KENV}/bin/pip" install -r requirements.txt
+"${KENV}/bin/pip" install -r "${BKDIR}/requirements.txt"
 
 # update link to beacon.py
 if [ -e "${KDIR}/klippy/extras/beacon.py" ]; then
