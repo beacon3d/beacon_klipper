@@ -1603,7 +1603,7 @@ class Region:
 
     def is_point_within(self, x, y):
         return ((x > self.x_min and x < self.x_max) and
-                (y > self.y_min and y < self.x_max))
+                (y > self.y_min and y < self.y_max))
 
 def arc_points(cx, cy, r, start_angle, span):
     # Angle delta is determined by a max deviation(md) from 0.1mm:
