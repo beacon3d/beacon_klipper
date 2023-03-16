@@ -817,7 +817,8 @@ class BeaconModel:
                 begin = f
             else:
                 end = f
-        raise beacon.printer.command_error("Beacon model convergence error")
+        raise self.beacon.printer.command_error(
+                "Beacon model convergence error")
 
     def dist_to_freq(self, dist, temp, max_e=0.00000001):
         freq = self.dist_to_freq_raw(dist, max_e)
