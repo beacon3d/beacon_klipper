@@ -1254,11 +1254,11 @@ class BeaconMeshHelper:
 
         self.speed = mesh_config.getfloat('speed', 50., above=0.,
                                           note_valid=False)
-        self.min_x, self.min_y = mesh_config.getfloatlist('mesh_min',
+        self.def_min_x, self.def_min_y = mesh_config.getfloatlist('mesh_min',
             count=2, note_valid=False)
-        self.max_x, self.max_y = mesh_config.getfloatlist('mesh_max',
+        self.def_max_x, self.def_max_y = mesh_config.getfloatlist('mesh_max',
             count=2, note_valid=False)
-        self.res_x, self.res_y = mesh_config.getintlist('probe_count',
+        self.def_res_x, self.def_res_y = mesh_config.getintlist('probe_count',
             count=2, note_valid=False)
         self.rri = mesh_config.getint('relative_reference_index', None,
             note_valid=False)
@@ -1267,9 +1267,6 @@ class BeaconMeshHelper:
         self.overscan = config.getfloat('mesh_overscan', -1, minval=0)
         self.cluster_size = config.getfloat('mesh_cluster_size', 1, minval=0)
         self.runs = config.getint('mesh_runs', 1, minval=1)
-
-        self.step_x = (self.max_x - self.min_x) / (self.res_x - 1)
-        self.step_y = (self.max_y - self.min_y) / (self.res_y - 1)
 
         self.faulty_regions = []
         for i in list(range(1, 100, 1)):
@@ -1312,16 +1309,16 @@ class BeaconMeshHelper:
         yo = self.beacon.y_offset
         settings = {
             'x': {
-                'range': [self.min_x-xo, self.max_x-xo],
+                'range': [self.def_min_x-xo, self.def_max_x-xo],
                 'machine': [status['axis_minimum'][0],
                             status['axis_maximum'][0]],
-                'count': self.res_y,
+                'count': self.def_res_y,
             },
             'y': {
-                'range': [self.min_y-yo, self.max_y-yo],
+                'range': [self.def_min_y-yo, self.def_max_y-yo],
                 'machine': [status['axis_minimum'][1],
                             status['axis_maximum'][1]],
-                'count': self.res_x,
+                'count': self.def_res_x,
             }
         }[self.dir]
 
@@ -1405,6 +1402,16 @@ class BeaconMeshHelper:
         return points
 
     def calibrate(self, gcmd):
+        self.min_x, self.min_y = coord_fallback(gcmd, "MESH_MIN", float,
+                self.def_min_x, self.def_min_y, lambda v, d: max(v, d))
+        self.max_x, self.max_y = coord_fallback(gcmd, "MESH_MAX", float,
+                self.def_max_x, self.def_max_y, lambda v, d: min(v, d))
+        self.res_x, self.res_y = coord_fallback(gcmd, "PROBE_COUNT", int,
+                self.def_res_x, self.def_res_y, lambda v, _d: max(v, 3))
+
+        self.step_x = (self.max_x - self.min_x) / (self.res_x - 1)
+        self.step_y = (self.max_y - self.min_y) / (self.res_y - 1)
+
         self.toolhead = self.beacon.toolhead
         path = self._generate_path()
 
@@ -1629,6 +1636,17 @@ def arc_points(cx, cy, r, start_angle, span):
         points.append((x,y))
 
     return points
+
+def coord_fallback(gcmd, name, parse, def_x, def_y, map=lambda v, d: v):
+    param = gcmd.get(name, None)
+    if param is not None:
+        try:
+            x, y = [parse(p.strip()) for p in param.split(",", 1)]
+            return map(x, def_x), map(y, def_y)
+        except:
+            raise gcmd.error("Unable to parse parameter '%s'" % (name,))
+    else:
+        return def_x, def_y
 
 def median(samples):
     return float(np.median(samples))
