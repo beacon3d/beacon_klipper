@@ -1409,6 +1409,11 @@ class BeaconMeshHelper:
         self.res_x, self.res_y = coord_fallback(gcmd, "PROBE_COUNT", int,
                 self.def_res_x, self.def_res_y, lambda v, _d: max(v, 3))
 
+        if self.min_x > self.max_x:
+            self.min_x, self.max_x = self.max_x, self.min_x
+        if self.min_y > self.max_y:
+            self.min_y, self.max_y = self.max_y, self.min_y
+
         self.step_x = (self.max_x - self.min_x) / (self.res_x - 1)
         self.step_y = (self.max_y - self.min_y) / (self.res_y - 1)
 
