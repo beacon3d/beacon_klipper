@@ -1132,10 +1132,13 @@ class BeaconEndstopWrapper:
         printer = self.beacon.printer
         printer.register_event_handler('klippy:mcu_identify',
                                        self._handle_mcu_identify)
+        printer.register_event_handler('homing:home_rails_begin',
+                                       self._handle_home_rails_begin)
         printer.register_event_handler('homing:home_rails_end',
                                        self._handle_home_rails_end)
 
         self.z_homed = False
+        self.is_homing = False
 
     def _handle_mcu_identify(self):
         self.toolhead = self.beacon.printer.lookup_object("toolhead")
@@ -1144,8 +1147,14 @@ class BeaconEndstopWrapper:
             if stepper.is_active_axis('z'):
                 self.add_stepper(stepper)
 
+    def _handle_home_rails_begin(self, homing_state, rails):
+        self.is_homing = False
+
     def _handle_home_rails_end(self, homing_state, rails):
         if self.beacon.model is None:
+            return
+
+        if not self.is_homing:
             return
 
         if 2 not in homing_state.get_axes():
@@ -1187,6 +1196,7 @@ class BeaconEndstopWrapper:
         if self.beacon.model is None:
             raise self.beacon.printer.command_error("No Beacon model loaded")
 
+        self.is_homing = True
         self.beacon._apply_threshold()
         clock = self._mcu.print_time_to_clock(print_time)
         rest_ticks = self._mcu.print_time_to_clock(print_time+rest_time) - clock
