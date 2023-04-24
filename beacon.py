@@ -278,7 +278,7 @@ class BeaconProbe:
             if 'z' not in kin_status['homed_axes']:
                 self.toolhead.get_last_move_time()
                 pos = self.toolhead.get_position()
-                pos[2] = kin_status['axis_maximum'][2]
+                pos[2] = kin_status['axis_maximum'][2] - 1.0
                 self.toolhead.set_position(pos, homing_axes=[2])
                 forced_z = True
 
