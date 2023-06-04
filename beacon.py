@@ -266,7 +266,7 @@ class BeaconProbe:
             kin_spos = {s.get_name(): s.get_commanded_position()
                         for s in kin.get_steppers()}
             kin_pos = kin.calc_position(kin_spos)
-            self._calibrate(gcmd, kin_pos)
+            self._calibrate(gcmd, kin_pos, False)
         else:
             curtime = self.printer.get_reactor().monotonic()
             kin_status = self.toolhead.get_status(curtime)
