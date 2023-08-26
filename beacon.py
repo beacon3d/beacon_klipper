@@ -65,6 +65,8 @@ class BeaconProbe:
         self.measured_min = 99999999.
         self.measured_max = 0.
 
+        self.last_sample = None
+
         self.mesh_helper = BeaconMeshHelper.create(self, config)
 
         self._stream_en = 0
@@ -559,6 +561,11 @@ class BeaconProbe:
             return None
         return self.model.freq_to_dist(freq, temp)
 
+    def get_status(self, eventtime):
+        return {
+            'last_sample': self.last_sample
+        }
+
     # Webhook handlers
 
     def _handle_req_status(self, web_request):
@@ -645,6 +652,12 @@ class BeaconProbe:
         last_value = sample['freq']
         dist = sample['dist']
         temp = sample['temp']
+        self.last_sample = {
+            'time': sample['time'],
+            'value': last_value,
+            'temp': temp,
+            'dist': dist,
+        }
         if dist is None:
             gcmd.respond_info("Last reading: %.2fHz, %.2fC, no model" %
                               (last_value, temp,))
