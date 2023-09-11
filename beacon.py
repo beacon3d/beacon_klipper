@@ -256,7 +256,7 @@ class BeaconProbe:
             # do probing move and then re-measure
             self._probing_move_to_probing_height(speed)
             (dist, samples) = self._sample(num_samples)
-        elif math.isnan(dist) and dist < 0:
+        elif math.isinf(dist) and dist < 0:
             # We were below the valid range of the model
             msg = "Attempted to probe with Beacon below calibrated model range"
             raise self.printer.command_error(msg)
