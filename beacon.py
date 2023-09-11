@@ -198,6 +198,7 @@ class BeaconProbe:
             raise self.printer.command_error("No Beacon model loaded")
 
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.)
+        allow_faulty = gcmd.get_int('ALLOW_FAULTY_COORDINATE', 0) != 0
         lift_speed = self.get_lift_speed(gcmd)
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.reactor.monotonic()
@@ -206,7 +207,7 @@ class BeaconProbe:
 
         self._start_streaming()
         try:
-            return self._probe(speed)
+            return self._probe(speed, allow_faulty=allow_faulty)
         finally:
             self._stop_streaming()
 
@@ -237,16 +238,28 @@ class BeaconProbe:
         samples = self._sample_printtime_sync(5, num_samples)
         return (median([s['dist'] for s in samples]), samples)
 
-    def _probe(self, speed, num_samples=10):
+    def _probe(self, speed, num_samples=10, allow_faulty=False):
         target = self.trigger_distance
         tdt = self.trigger_dive_threshold
         (dist, samples) = self._sample(num_samples)
+
+        x, y = samples[0]['pos'][0:2]
+        if self._is_faulty_coordinate(x, y, True):
+            msg = "Probing within a faulty area"
+            if not allow_faulty:
+                raise self.printer.command_error(msg)
+            else:
+                self.gcode.respond_raw("!! " + msg + "\n")
 
         if dist > target + tdt:
             # If we are above the dive threshold right now, we'll need to
             # do probing move and then re-measure
             self._probing_move_to_probing_height(speed)
             (dist, samples) = self._sample(num_samples)
+        elif math.isnan(dist) and dist < 0:
+            # We were below the valid range of the model
+            msg = "Attempted to probe with Beacon below calibrated model range"
+            raise self.printer.command_error(msg)
         elif self.toolhead.get_position()[2] < target - tdt:
             # We are below the probing target height, we'll move to the
             # correct height and take a new sample.
@@ -263,11 +276,19 @@ class BeaconProbe:
     # Calibration routines
 
     def _start_calibration(self, gcmd):
+
+        allow_faulty = gcmd.get_int('ALLOW_FAULTY_COORDINATE', 0) != 0
         if gcmd.get("SKIP_MANUAL_PROBE", None) is not None:
             kin = self.toolhead.get_kinematics()
             kin_spos = {s.get_name(): s.get_commanded_position()
                         for s in kin.get_steppers()}
             kin_pos = kin.calc_position(kin_spos)
+            if self._is_faulty_coordinate(kin_pos[0], kin_pos[1]):
+                msg = "Calibrating within a faulty area"
+                if not allow_faulty:
+                    raise gcmd.error(msg)
+                else:
+                    gcmd.respond_raw("!! " + msg + "\n")
             self._calibrate(gcmd, kin_pos, False)
         else:
             curtime = self.printer.get_reactor().monotonic()
@@ -275,6 +296,14 @@ class BeaconProbe:
             if 'xy' not in kin_status['homed_axes']:
                 raise self.printer.command_error("Must home X and Y "
                                                  "before calibration")
+
+            kin_pos = self.toolhead.get_position()
+            if self._is_faulty_coordinate(kin_pos[0], kin_pos[1]):
+                msg = "Calibrating within a faulty area"
+                if not allow_faulty:
+                    raise gcmd.error(msg)
+                else:
+                    gcmd.respond_raw("!! " + msg + "\n")
 
             forced_z = False
             if 'z' not in kin_status['homed_axes']:
@@ -310,6 +339,7 @@ class BeaconProbe:
 
         # Move over to probe coordinate and pull out backlash
         curpos = self.toolhead.get_position()
+
         curpos[2] = cal_max_z + self.backlash_comp
         toolhead.manual_move(curpos, move_speed) # Up
         curpos[0] -= self.x_offset
@@ -361,7 +391,7 @@ class BeaconProbe:
         f = open(fn, "w")
         f.write("freq,z,temp\n")
         for i in range(len(freq)):
-            f.write("%.5f,%.5f,%.3f\n" % (freq[i], z_offset[i], temp[i]))
+            f.write("%.5f,%.5f,%.3f\n" % (freq[i], z_ffset[i], temp[i]))
         f.close()
 
         gcmd.respond_info("Beacon calibrated at %.3f,%.3f from "
@@ -386,6 +416,11 @@ class BeaconProbe:
             raise self.printer.config_error("Multiple Beacon models with same"
                                             "name '%s'" % (name,))
         self.models[name] = model
+
+    def _is_faulty_coordinate(self, x, y, add_offsets=False):
+        if not self.mesh_helper:
+            return False
+        return self.mesh_helper._is_faulty_coordinate(x, y, add_offsets)
 
     # Streaming mode
 
@@ -562,8 +597,12 @@ class BeaconProbe:
         return self.model.freq_to_dist(freq, temp)
 
     def get_status(self, eventtime):
+        model = None
+        if self.model is not None:
+            model = self.model.name
         return {
-            'last_sample': self.last_sample
+            'last_sample': self.last_sample,
+            'model': model,
         }
 
     # Webhook handlers
@@ -706,6 +745,7 @@ class BeaconProbe:
         lift_speed = self.get_lift_speed(gcmd)
         sample_count = gcmd.get_int("SAMPLES", 10, minval=1)
         sample_retract_dist = gcmd.get_float("SAMPLE_RETRACT_DIST", 0)
+        allow_faulty = gcmd.get_int('ALLOW_FAULTY_COORDINATE', 0) != 0
         pos = self.toolhead.get_position()
         gcmd.respond_info("PROBE_ACCURACY at X:%.3f Y:%.3f Z:%.3f"
                           " (samples=%d retract=%.3f"
@@ -721,7 +761,7 @@ class BeaconProbe:
         self.multi_probe_begin()
         positions = []
         while len(positions) < sample_count:
-            pos = self._probe(speed)
+            pos = self._probe(speed, allow_faulty=allow_faulty)
             positions.append(pos)
             self.toolhead.manual_move(liftpos, lift_speed)
         self.multi_probe_end()
@@ -809,7 +849,14 @@ class BeaconModel:
                     "the printer." % (self.name,))
 
     def freq_to_dist_raw(self, freq):
-        return float(self.poly(1/freq) - self.offset)
+        [begin, end] = self.poly.domain
+        invfreq = 1/freq
+        if invfreq > end:
+            return float('inf')
+        elif invfreq < begin:
+            return float('-inf')
+        else:
+            return float(self.poly(invfreq) - self.offset)
 
     def freq_to_dist(self, freq, temp):
         if self.temp is not None and \
@@ -819,6 +866,10 @@ class BeaconModel:
         return self.freq_to_dist_raw(freq)
 
     def dist_to_freq_raw(self, dist, max_e=0.00000001):
+        if dist < self.min_z or dist > self.max_z:
+            msg = ("Attempted to map out-of-range distance %f, valid range "
+                    "[%.3f, %.3f]" % (dist, self.min_z, self.max_z))
+            raise self.beacon.printer.command_error(msg)
         dist += self.offset
         [begin, end] = self.poly.domain
         for _ in range(0, 50):
@@ -1484,14 +1535,18 @@ class BeaconMeshHelper:
 
         clusters = {}
         total_samples = [0]
+        invalid_samples = 0
 
         def cb(sample):
             total_samples[0] += 1
+            d = sample['dist']
+            if math.isinf(d):
+                invalid_samples += 1
+                return
 
             (x, y, z) = sample['pos']
             x += xo
             y += yo
-            d = sample['dist']
 
             # Calculate coordinate of the cluster we are in
             xi = int(round((x - min_x) / self.step_x))
@@ -1518,11 +1573,18 @@ class BeaconMeshHelper:
 
         gcmd.respond_info("Sampled %d total points over %d runs" %
                           (total_samples[0], runs))
+        if invalid_samples:
+            gcmd.respond_info("!! Encountered %d invalid samples!" % (invalid_samples,))
         gcmd.respond_info("Samples binned in %d clusters" % (len(clusters),))
 
         return clusters
 
-    def _is_faulty_coordinate(self, x, y):
+    def _is_faulty_coordinate(self, x, y, add_offsets=False):
+        if add_offsets:
+            xo, yo = self.beacon.x_offset, self.beacon.y_offset
+            x += xo
+            y += yo
+        self.gcode.respond_info("Faulty? %f %f" % (x, y))
         for r in self.faulty_regions:
             if r.is_point_within(x, y):
                 return True
