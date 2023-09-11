@@ -513,8 +513,14 @@ class BeaconProbe:
                         updated_timer = True
 
                     self._enrich_sample_temp(sample)
-
                     temp = sample['temp']
+                    if self.model_temp is not None and not (-40 < temp < 180):
+                        msg = ("Beacon temperature sensor faulty(read %.2f C),"
+                                " disabling temperaure compensation" % (temp,))
+                        logging.error(msg)
+                        self.gcode.respond_raw("!! " + msg + "\n")
+                        self.model_temp = None
+
                     self.last_temp = temp
                     if temp:
                         self.measured_min = min(self.measured_min, temp)
