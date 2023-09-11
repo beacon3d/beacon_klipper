@@ -391,7 +391,7 @@ class BeaconProbe:
         f = open(fn, "w")
         f.write("freq,z,temp\n")
         for i in range(len(freq)):
-            f.write("%.5f,%.5f,%.3f\n" % (freq[i], z_ffset[i], temp[i]))
+            f.write("%.5f,%.5f,%.3f\n" % (freq[i], z_offset[i], temp[i]))
         f.close()
 
         gcmd.respond_info("Beacon calibrated at %.3f,%.3f from "
