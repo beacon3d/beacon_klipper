@@ -1584,7 +1584,6 @@ class BeaconMeshHelper:
             xo, yo = self.beacon.x_offset, self.beacon.y_offset
             x += xo
             y += yo
-        self.gcode.respond_info("Faulty? %f %f" % (x, y))
         for r in self.faulty_regions:
             if r.is_point_within(x, y):
                 return True
