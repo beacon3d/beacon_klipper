@@ -58,6 +58,7 @@ class BeaconProbe:
         self.models = {}
         self.model_temp_builder = BeaconTempModelBuilder.load(config)
         self.model_temp = None
+        self.fmin = None
         self.default_model_name = config.get('default_model_name', 'default')
         self.model_manager = ModelManager(self)
 
@@ -137,6 +138,8 @@ class BeaconProbe:
         self.beacon_stream_cmd.send([0])
 
         self.model_temp = self.model_temp_builder.build_with_nvm(self)
+        if self.model_temp:
+            self.fmin = self.model_temp.fmin
         self.model = self.models.get(self.default_model_name, None)
         if self.model:
             self._apply_threshold()
@@ -432,8 +435,11 @@ class BeaconProbe:
         if not self.hardware_failure:
             msg = None
             if sample['data'] == 0xFFFFFFF:
-                msg = "Beacon hardware issue: coil is shorted or not connected"
+                msg = "coil is shorted or not connected"
+            elif self.fmin is not None and sample['freq'] > 1.35 * self.fmin:
+                msg = "coil expected max frequency exceeded"
             if msg:
+                msg = "Beacon hardware issue: " + msg
                 self.hardware_failure = msg
                 logging.error(msg)
                 if self._stream_en:
@@ -451,9 +457,12 @@ class BeaconProbe:
         temp_adc = sample['temp'] / self.temp_smooth_count * self.inv_adc_max
         sample['temp'] = self.thermistor.calc_temp(temp_adc)
 
-    def _enrich_sample(self, sample):
+    def _enrich_sample_freq(self, sample):
         sample['data_smooth'] = self._data_filter.value()
         freq = sample['freq'] = self.count_to_freq(sample['data_smooth'])
+        self._check_hardware(sample)
+
+    def _enrich_sample(self, sample):
         sample['dist'] = self.freq_to_dist(freq, sample['temp'])
         pos, vel = self._get_trapq_position(sample['time'])
 
@@ -528,8 +537,6 @@ class BeaconProbe:
                                 curtime + STREAM_TIMEOUT)
                         updated_timer = True
 
-                    self._check_hardware(sample)
-
                     self._enrich_sample_temp(sample)
                     temp = sample['temp']
                     if self.model_temp is not None and not (-40 < temp < 180):
@@ -546,6 +553,7 @@ class BeaconProbe:
 
                     self._enrich_sample_time(sample)
                     self._data_filter.update(sample['time'], sample['data'])
+                    self._enrich_sample_freq(sample)
 
                     if len(self._stream_callbacks) > 0:
                         self._enrich_sample(sample)
