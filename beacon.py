@@ -1228,6 +1228,9 @@ class BeaconEndstopWrapper:
         # kinematic position.
         samples = self.beacon._sample_printtime_sync(5, 10)
         dist = median([s['dist'] for s in samples])
+        if math.isinf(dist):
+            raise self.beacon.printer.command_error(
+                    "Toolhead stopped below model range")
         homing_state.set_homed_position([None, None, dist])
 
     def get_mcu(self):
