@@ -26,6 +26,7 @@ from mcu import MCU, MCU_trsync
 from clocksync import SecondarySync
 
 STREAM_BUFFER_LIMIT_DEFAULT = 100
+STREAM_TIMEOUT = 1.0
 
 class BeaconProbe:
     def __init__(self, config):
@@ -70,6 +71,8 @@ class BeaconProbe:
         self.mesh_helper = BeaconMeshHelper.create(self, config)
 
         self._stream_en = 0
+        self._stream_timeout_timer = self.reactor.register_timer(
+                self._stream_timeout)
         self._stream_callbacks = {}
         self._stream_latency_requests = {}
         self._stream_buffer = []
@@ -446,14 +449,27 @@ class BeaconProbe:
     def _start_streaming(self):
         if self._stream_en == 0:
             self.beacon_stream_cmd.send([1])
+            curtime = self.reactor.monotonic()
+            self.reactor.update_timer(self._stream_timeout_timer,
+                    curtime + STREAM_TIMEOUT)
         self._stream_en += 1
         self._data_filter.reset()
         self._stream_flush()
     def _stop_streaming(self):
         self._stream_en -= 1
         if self._stream_en == 0:
+            self.reactor.update_timer(self._stream_timeout_timer,
+                    self.reactor.NEVER)
             self.beacon_stream_cmd.send([0])
         self._stream_flush()
+
+    def _stream_timeout(self, eventtime):
+        if not self._stream_en:
+            return self.reactor.NEVER
+        msg = "Beacon sensor not receiving data"
+        logging.error(msg)
+        self.printer.invoke_shutdown(msg)
+        return self.reactor.NEVER
 
     def request_stream_latency(self, latency):
         next_key = 0
@@ -488,7 +504,14 @@ class BeaconProbe:
         while True:
             try:
                 samples = self._stream_samples_queue.get_nowait()
+                updated_timer = False
                 for sample in samples:
+                    if not updated_timer:
+                        curtime = self.reactor.monotonic()
+                        self.reactor.update_timer(self._stream_timeout_timer,
+                                curtime + STREAM_TIMEOUT)
+                        updated_timer = True
+
                     self._enrich_sample_temp(sample)
 
                     temp = sample['temp']
