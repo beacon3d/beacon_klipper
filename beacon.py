@@ -67,6 +67,7 @@ class BeaconProbe:
         self.measured_max = 0.
 
         self.last_sample = None
+        self.hardware_failure = None
 
         self.mesh_helper = BeaconMeshHelper.create(self, config)
 
@@ -427,6 +428,21 @@ class BeaconProbe:
 
     # Streaming mode
 
+    def _check_hardware(self, sample):
+        if not self.hardware_failure:
+            msg = None
+            if sample['data'] == 0xFFFFFFF:
+                msg = "Beacon hardware issue: coil is shorted or not connected"
+            if msg:
+                self.hardware_failure = msg
+                logging.error(msg)
+                if self._stream_en:
+                    self.printer.invoke_shutdown(msg)
+                else:
+                    self.gcode.respond_raw("!! " + msg + "\n")
+        elif self._stream_en:
+            self.printer.invoke_shutdown(self.hardware_failure)
+
     def _enrich_sample_time(self, sample):
         clock = sample['clock'] = self._mcu.clock32_to_clock64(sample['clock'])
         sample['time'] = self._mcu.clock_to_print_time(clock)
@@ -511,6 +527,8 @@ class BeaconProbe:
                         self.reactor.update_timer(self._stream_timeout_timer,
                                 curtime + STREAM_TIMEOUT)
                         updated_timer = True
+
+                    self._check_hardware(sample)
 
                     self._enrich_sample_temp(sample)
                     temp = sample['temp']
