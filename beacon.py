@@ -459,11 +459,11 @@ class BeaconProbe:
 
     def _enrich_sample_freq(self, sample):
         sample['data_smooth'] = self._data_filter.value()
-        freq = sample['freq'] = self.count_to_freq(sample['data_smooth'])
+        sample['freq'] = self.count_to_freq(sample['data_smooth'])
         self._check_hardware(sample)
 
     def _enrich_sample(self, sample):
-        sample['dist'] = self.freq_to_dist(freq, sample['temp'])
+        sample['dist'] = self.freq_to_dist(sample['freq'], sample['temp'])
         pos, vel = self._get_trapq_position(sample['time'])
 
         if pos is None:
@@ -1320,6 +1320,7 @@ class BeaconEndstopWrapper:
 
         self.is_homing = True
         self.beacon._apply_threshold()
+        self.beacon._sample_async()
         clock = self._mcu.print_time_to_clock(print_time)
         rest_ticks = self._mcu.print_time_to_clock(print_time+rest_time) - clock
         self._rest_ticks = rest_ticks
