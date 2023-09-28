@@ -1586,6 +1586,9 @@ class BeaconMeshHelper:
                 self.toolhead.manual_move([x, y, None], speed)
         self.toolhead.wait_moves()
 
+    def _is_valid_position(self, x, y):
+        return self.min_x <= x <= self.max_x and self.min_y <= y <= self.min_y
+
     def _sample_mesh(self, gcmd, path, speed, runs):
         cs = gcmd.get_float("CLUSTER_SIZE", self.cluster_size, minval=0.)
 
@@ -1594,18 +1597,19 @@ class BeaconMeshHelper:
 
         clusters = {}
         total_samples = [0]
-        invalid_samples = 0
+        invalid_samples = [0]
 
         def cb(sample):
             total_samples[0] += 1
             d = sample['dist']
-            if math.isinf(d):
-                invalid_samples += 1
-                return
-
             (x, y, z) = sample['pos']
             x += xo
             y += yo
+
+            if math.isinf(d):
+                if self._is_valid_position(x, y):
+                    invalid_samples[0] += 1
+                return
 
             # Calculate coordinate of the cluster we are in
             xi = int(round((x - min_x) / self.step_x))
@@ -1632,8 +1636,8 @@ class BeaconMeshHelper:
 
         gcmd.respond_info("Sampled %d total points over %d runs" %
                           (total_samples[0], runs))
-        if invalid_samples:
-            gcmd.respond_info("!! Encountered %d invalid samples!" % (invalid_samples,))
+        if invalid_samples[0]:
+            gcmd.respond_info("!! Encountered %d invalid samples!" % (invalid_samples[0],))
         gcmd.respond_info("Samples binned in %d clusters" % (len(clusters),))
 
         return clusters
