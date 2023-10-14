@@ -26,6 +26,7 @@ from mcu import MCU, MCU_trsync
 from clocksync import SecondarySync
 
 STREAM_BUFFER_LIMIT_DEFAULT = 100
+STREAM_TIMEOUT = 1.0
 
 class BeaconProbe:
     def __init__(self, config):
@@ -57,6 +58,7 @@ class BeaconProbe:
         self.models = {}
         self.model_temp_builder = BeaconTempModelBuilder.load(config)
         self.model_temp = None
+        self.fmin = None
         self.default_model_name = config.get('default_model_name', 'default')
         self.model_manager = ModelManager(self)
 
@@ -66,10 +68,13 @@ class BeaconProbe:
         self.measured_max = 0.
 
         self.last_sample = None
+        self.hardware_failure = None
 
         self.mesh_helper = BeaconMeshHelper.create(self, config)
 
         self._stream_en = 0
+        self._stream_timeout_timer = self.reactor.register_timer(
+                self._stream_timeout)
         self._stream_callbacks = {}
         self._stream_latency_requests = {}
         self._stream_buffer = []
@@ -133,6 +138,8 @@ class BeaconProbe:
         self.beacon_stream_cmd.send([0])
 
         self.model_temp = self.model_temp_builder.build_with_nvm(self)
+        if self.model_temp:
+            self.fmin = self.model_temp.fmin
         self.model = self.models.get(self.default_model_name, None)
         if self.model:
             self._apply_threshold()
@@ -198,6 +205,7 @@ class BeaconProbe:
             raise self.printer.command_error("No Beacon model loaded")
 
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.)
+        allow_faulty = gcmd.get_int('ALLOW_FAULTY_COORDINATE', 0) != 0
         lift_speed = self.get_lift_speed(gcmd)
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.reactor.monotonic()
@@ -206,7 +214,7 @@ class BeaconProbe:
 
         self._start_streaming()
         try:
-            return self._probe(speed)
+            return self._probe(speed, allow_faulty=allow_faulty)
         finally:
             self._stop_streaming()
 
@@ -237,16 +245,28 @@ class BeaconProbe:
         samples = self._sample_printtime_sync(5, num_samples)
         return (median([s['dist'] for s in samples]), samples)
 
-    def _probe(self, speed, num_samples=10):
+    def _probe(self, speed, num_samples=10, allow_faulty=False):
         target = self.trigger_distance
         tdt = self.trigger_dive_threshold
         (dist, samples) = self._sample(num_samples)
+
+        x, y = samples[0]['pos'][0:2]
+        if self._is_faulty_coordinate(x, y, True):
+            msg = "Probing within a faulty area"
+            if not allow_faulty:
+                raise self.printer.command_error(msg)
+            else:
+                self.gcode.respond_raw("!! " + msg + "\n")
 
         if dist > target + tdt:
             # If we are above the dive threshold right now, we'll need to
             # do probing move and then re-measure
             self._probing_move_to_probing_height(speed)
             (dist, samples) = self._sample(num_samples)
+        elif math.isinf(dist) and dist < 0:
+            # We were below the valid range of the model
+            msg = "Attempted to probe with Beacon below calibrated model range"
+            raise self.printer.command_error(msg)
         elif self.toolhead.get_position()[2] < target - tdt:
             # We are below the probing target height, we'll move to the
             # correct height and take a new sample.
@@ -263,11 +283,19 @@ class BeaconProbe:
     # Calibration routines
 
     def _start_calibration(self, gcmd):
+
+        allow_faulty = gcmd.get_int('ALLOW_FAULTY_COORDINATE', 0) != 0
         if gcmd.get("SKIP_MANUAL_PROBE", None) is not None:
             kin = self.toolhead.get_kinematics()
             kin_spos = {s.get_name(): s.get_commanded_position()
                         for s in kin.get_steppers()}
             kin_pos = kin.calc_position(kin_spos)
+            if self._is_faulty_coordinate(kin_pos[0], kin_pos[1]):
+                msg = "Calibrating within a faulty area"
+                if not allow_faulty:
+                    raise gcmd.error(msg)
+                else:
+                    gcmd.respond_raw("!! " + msg + "\n")
             self._calibrate(gcmd, kin_pos, False)
         else:
             curtime = self.printer.get_reactor().monotonic()
@@ -275,6 +303,14 @@ class BeaconProbe:
             if 'xy' not in kin_status['homed_axes']:
                 raise self.printer.command_error("Must home X and Y "
                                                  "before calibration")
+
+            kin_pos = self.toolhead.get_position()
+            if self._is_faulty_coordinate(kin_pos[0], kin_pos[1]):
+                msg = "Calibrating within a faulty area"
+                if not allow_faulty:
+                    raise gcmd.error(msg)
+                else:
+                    gcmd.respond_raw("!! " + msg + "\n")
 
             forced_z = False
             if 'z' not in kin_status['homed_axes']:
@@ -310,6 +346,7 @@ class BeaconProbe:
 
         # Move over to probe coordinate and pull out backlash
         curpos = self.toolhead.get_position()
+
         curpos[2] = cal_max_z + self.backlash_comp
         toolhead.manual_move(curpos, move_speed) # Up
         curpos[0] -= self.x_offset
@@ -387,7 +424,30 @@ class BeaconProbe:
                                             "name '%s'" % (name,))
         self.models[name] = model
 
+    def _is_faulty_coordinate(self, x, y, add_offsets=False):
+        if not self.mesh_helper:
+            return False
+        return self.mesh_helper._is_faulty_coordinate(x, y, add_offsets)
+
     # Streaming mode
+
+    def _check_hardware(self, sample):
+        if not self.hardware_failure:
+            msg = None
+            if sample['data'] == 0xFFFFFFF:
+                msg = "coil is shorted or not connected"
+            elif self.fmin is not None and sample['freq'] > 1.35 * self.fmin:
+                msg = "coil expected max frequency exceeded"
+            if msg:
+                msg = "Beacon hardware issue: " + msg
+                self.hardware_failure = msg
+                logging.error(msg)
+                if self._stream_en:
+                    self.printer.invoke_shutdown(msg)
+                else:
+                    self.gcode.respond_raw("!! " + msg + "\n")
+        elif self._stream_en:
+            self.printer.invoke_shutdown(self.hardware_failure)
 
     def _enrich_sample_time(self, sample):
         clock = sample['clock'] = self._mcu.clock32_to_clock64(sample['clock'])
@@ -397,10 +457,13 @@ class BeaconProbe:
         temp_adc = sample['temp'] / self.temp_smooth_count * self.inv_adc_max
         sample['temp'] = self.thermistor.calc_temp(temp_adc)
 
-    def _enrich_sample(self, sample):
+    def _enrich_sample_freq(self, sample):
         sample['data_smooth'] = self._data_filter.value()
-        freq = sample['freq'] = self.count_to_freq(sample['data_smooth'])
-        sample['dist'] = self.freq_to_dist(freq, sample['temp'])
+        sample['freq'] = self.count_to_freq(sample['data_smooth'])
+        self._check_hardware(sample)
+
+    def _enrich_sample(self, sample):
+        sample['dist'] = self.freq_to_dist(sample['freq'], sample['temp'])
         pos, vel = self._get_trapq_position(sample['time'])
 
         if pos is None:
@@ -411,14 +474,27 @@ class BeaconProbe:
     def _start_streaming(self):
         if self._stream_en == 0:
             self.beacon_stream_cmd.send([1])
+            curtime = self.reactor.monotonic()
+            self.reactor.update_timer(self._stream_timeout_timer,
+                    curtime + STREAM_TIMEOUT)
         self._stream_en += 1
         self._data_filter.reset()
         self._stream_flush()
     def _stop_streaming(self):
         self._stream_en -= 1
         if self._stream_en == 0:
+            self.reactor.update_timer(self._stream_timeout_timer,
+                    self.reactor.NEVER)
             self.beacon_stream_cmd.send([0])
         self._stream_flush()
+
+    def _stream_timeout(self, eventtime):
+        if not self._stream_en:
+            return self.reactor.NEVER
+        msg = "Beacon sensor not receiving data"
+        logging.error(msg)
+        self.printer.invoke_shutdown(msg)
+        return self.reactor.NEVER
 
     def request_stream_latency(self, latency):
         next_key = 0
@@ -453,10 +529,23 @@ class BeaconProbe:
         while True:
             try:
                 samples = self._stream_samples_queue.get_nowait()
+                updated_timer = False
                 for sample in samples:
-                    self._enrich_sample_temp(sample)
+                    if not updated_timer:
+                        curtime = self.reactor.monotonic()
+                        self.reactor.update_timer(self._stream_timeout_timer,
+                                curtime + STREAM_TIMEOUT)
+                        updated_timer = True
 
+                    self._enrich_sample_temp(sample)
                     temp = sample['temp']
+                    if self.model_temp is not None and not (-40 < temp < 180):
+                        msg = ("Beacon temperature sensor faulty(read %.2f C),"
+                                " disabling temperaure compensation" % (temp,))
+                        logging.error(msg)
+                        self.gcode.respond_raw("!! " + msg + "\n")
+                        self.model_temp = None
+
                     self.last_temp = temp
                     if temp:
                         self.measured_min = min(self.measured_min, temp)
@@ -464,6 +553,7 @@ class BeaconProbe:
 
                     self._enrich_sample_time(sample)
                     self._data_filter.update(sample['time'], sample['data'])
+                    self._enrich_sample_freq(sample)
 
                     if len(self._stream_callbacks) > 0:
                         self._enrich_sample(sample)
@@ -562,8 +652,12 @@ class BeaconProbe:
         return self.model.freq_to_dist(freq, temp)
 
     def get_status(self, eventtime):
+        model = None
+        if self.model is not None:
+            model = self.model.name
         return {
-            'last_sample': self.last_sample
+            'last_sample': self.last_sample,
+            'model': model,
         }
 
     # Webhook handlers
@@ -706,6 +800,7 @@ class BeaconProbe:
         lift_speed = self.get_lift_speed(gcmd)
         sample_count = gcmd.get_int("SAMPLES", 10, minval=1)
         sample_retract_dist = gcmd.get_float("SAMPLE_RETRACT_DIST", 0)
+        allow_faulty = gcmd.get_int('ALLOW_FAULTY_COORDINATE', 0) != 0
         pos = self.toolhead.get_position()
         gcmd.respond_info("PROBE_ACCURACY at X:%.3f Y:%.3f Z:%.3f"
                           " (samples=%d retract=%.3f"
@@ -721,7 +816,7 @@ class BeaconProbe:
         self.multi_probe_begin()
         positions = []
         while len(positions) < sample_count:
-            pos = self._probe(speed)
+            pos = self._probe(speed, allow_faulty=allow_faulty)
             positions.append(pos)
             self.toolhead.manual_move(liftpos, lift_speed)
         self.multi_probe_end()
@@ -809,7 +904,14 @@ class BeaconModel:
                     "the printer." % (self.name,))
 
     def freq_to_dist_raw(self, freq):
-        return float(self.poly(1/freq) - self.offset)
+        [begin, end] = self.poly.domain
+        invfreq = 1/freq
+        if invfreq > end:
+            return float('inf')
+        elif invfreq < begin:
+            return float('-inf')
+        else:
+            return float(self.poly(invfreq) - self.offset)
 
     def freq_to_dist(self, freq, temp):
         if self.temp is not None and \
@@ -819,6 +921,10 @@ class BeaconModel:
         return self.freq_to_dist_raw(freq)
 
     def dist_to_freq_raw(self, dist, max_e=0.00000001):
+        if dist < self.min_z or dist > self.max_z:
+            msg = ("Attempted to map out-of-range distance %f, valid range "
+                    "[%.3f, %.3f]" % (dist, self.min_z, self.max_z))
+            raise self.beacon.printer.command_error(msg)
         dist += self.offset
         [begin, end] = self.poly.domain
         for _ in range(0, 50):
@@ -1177,6 +1283,9 @@ class BeaconEndstopWrapper:
         # kinematic position.
         samples = self.beacon._sample_printtime_sync(5, 10)
         dist = median([s['dist'] for s in samples])
+        if math.isinf(dist):
+            raise self.beacon.printer.command_error(
+                    "Toolhead stopped below model range")
         homing_state.set_homed_position([None, None, dist])
 
     def get_mcu(self):
@@ -1211,6 +1320,7 @@ class BeaconEndstopWrapper:
 
         self.is_homing = True
         self.beacon._apply_threshold()
+        self.beacon._sample_async()
         clock = self._mcu.print_time_to_clock(print_time)
         rest_ticks = self._mcu.print_time_to_clock(print_time+rest_time) - clock
         self._rest_ticks = rest_ticks
@@ -1476,6 +1586,9 @@ class BeaconMeshHelper:
                 self.toolhead.manual_move([x, y, None], speed)
         self.toolhead.wait_moves()
 
+    def _is_valid_position(self, x, y):
+        return self.min_x <= x <= self.max_x and self.min_y <= y <= self.min_y
+
     def _sample_mesh(self, gcmd, path, speed, runs):
         cs = gcmd.get_float("CLUSTER_SIZE", self.cluster_size, minval=0.)
 
@@ -1484,14 +1597,19 @@ class BeaconMeshHelper:
 
         clusters = {}
         total_samples = [0]
+        invalid_samples = [0]
 
         def cb(sample):
             total_samples[0] += 1
-
+            d = sample['dist']
             (x, y, z) = sample['pos']
             x += xo
             y += yo
-            d = sample['dist']
+
+            if math.isinf(d):
+                if self._is_valid_position(x, y):
+                    invalid_samples[0] += 1
+                return
 
             # Calculate coordinate of the cluster we are in
             xi = int(round((x - min_x) / self.step_x))
@@ -1518,11 +1636,17 @@ class BeaconMeshHelper:
 
         gcmd.respond_info("Sampled %d total points over %d runs" %
                           (total_samples[0], runs))
+        if invalid_samples[0]:
+            gcmd.respond_info("!! Encountered %d invalid samples!" % (invalid_samples[0],))
         gcmd.respond_info("Samples binned in %d clusters" % (len(clusters),))
 
         return clusters
 
-    def _is_faulty_coordinate(self, x, y):
+    def _is_faulty_coordinate(self, x, y, add_offsets=False):
+        if add_offsets:
+            xo, yo = self.beacon.x_offset, self.beacon.y_offset
+            x += xo
+            y += yo
         for r in self.faulty_regions:
             if r.is_point_within(x, y):
                 return True
