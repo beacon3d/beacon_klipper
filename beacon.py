@@ -16,17 +16,21 @@ import json
 import struct
 import numpy as np
 import copy
+import collections
+import itertools
 from numpy.polynomial import Polynomial
 from . import manual_probe
 from . import probe
 from . import bed_mesh
 from . import thermistor
 from . import adc_temperature
+from . import adxl345
 from mcu import MCU, MCU_trsync
 from clocksync import SecondarySync
 
 STREAM_BUFFER_LIMIT_DEFAULT = 100
 STREAM_TIMEOUT = 1.0
+API_DUMP_FIELDS = ["dist", "temp", "pos", "freq", "vel", "time"]
 
 
 class BeaconProbe:
@@ -72,6 +76,8 @@ class BeaconProbe:
         self.hardware_failure = None
 
         self.mesh_helper = BeaconMeshHelper.create(self, config)
+        self.accel_helper = None
+        self.accel_config = BeaconAccelConfig(config)
 
         self._stream_en = 0
         self._stream_timeout_timer = self.reactor.register_timer(self._stream_timeout)
@@ -104,11 +110,17 @@ class BeaconProbe:
         )
         self._mcu.register_config_callback(self._build_config)
         self._mcu.register_response(self._handle_beacon_data, "beacon_data")
+
         # Register webhooks
-        webhooks = self.printer.lookup_object("webhooks")
-        self._api_dump_helper = APIDumpHelper(self)
-        webhooks.register_endpoint("beacon/status", self._handle_req_status)
-        webhooks.register_endpoint("beacon/dump", self._handle_req_dump)
+        self._api_dump = APIDumpHelper(
+            self.printer,
+            lambda: self.streaming_session(self._api_dump_callback, latency=50),
+            lambda stream: stream.stop(),
+            None,
+        )
+        self.webhooks = self.printer.lookup_object("webhooks")
+        self.webhooks.register_endpoint("beacon/status", self._handle_req_status)
+        self.webhooks.register_endpoint("beacon/dump", self._handle_req_dump)
         # Register gcode commands
         self.gcode = self.printer.lookup_object("gcode")
         self.gcode.register_command(
@@ -144,6 +156,8 @@ class BeaconProbe:
 
         # Ensure streaming mode is stopped
         self.beacon_stream_cmd.send([0])
+        if self.accel_helper:
+            self.accel_helper._handle_connect()
 
         self.model_temp = self.model_temp_builder.build_with_nvm(self)
         if self.model_temp:
@@ -185,8 +199,17 @@ class BeaconProbe:
             cq=self.cmd_queue,
         )
 
+        constants = self._mcu.get_constants()
+        if constants.get("BEACON_HAS_ACCEL", 0) == 1:
+            logging.info("Enabling Beacon accelerometer")
+            self.accel_helper = BeaconAccelHelper(self, self.accel_config)
+
     def stats(self, eventtime):
         return False, "%s: coil_temp=%.1f" % (self.name, self.last_temp)
+
+    def _api_dump_callback(self, sample):
+        tmp = [sample.get(key, None) for key in API_DUMP_FIELDS]
+        self._api_dump.buffer.append(tmp)
 
     # Virtual endstop
 
@@ -289,6 +312,14 @@ class BeaconProbe:
         )
 
         return [pos[0], pos[1], pos[2] + target - dist]
+
+    # Accelerometer interface
+
+    def start_internal_client(self):
+        if not self.accel_helper:
+            msg = "This Beacon has no accelerometer"
+            raise self.printer.command_error(msg)
+        return self.accel_helper.start_internal_client()
 
     # Calibration routines
 
@@ -701,7 +732,8 @@ class BeaconProbe:
         web_request.send(out)
 
     def _handle_req_dump(self, web_request):
-        self._api_dump_helper.add_client(web_request)
+        self._api_dump.add_web_client(web_request)
+        web_request.send({"header": API_DUMP_FIELDS})
 
     # GCode command handlers
 
@@ -2060,6 +2092,358 @@ def coord_fallback(gcmd, name, parse, def_x, def_y, map=lambda v, d: v):
 
 def median(samples):
     return float(np.median(samples))
+
+
+GRAVITY = 9.80655
+ACCEL_BYTES_PER_SAMPLE = 6
+
+Accel_Measurement = collections.namedtuple(
+    "Accel_Measurement", ("time", "accel_x", "accel_y", "accel_z")
+)
+
+
+class BeaconAccelDummyConfig(object):
+    def __init__(self, printer, accel_config):
+        self.printer = printer
+        self.accel_config = accel_config
+
+    def get_name(self):
+        return "beacon"
+
+    def has_section(self, name):
+        return name == "adxl345" and self.accel_config.adxl345_exists
+
+    def get_printer(self):
+        return self.printer
+
+
+class BeaconAccelConfig(object):
+    def __init__(self, config):
+        self.default_scale = config.get("accel_scale", "")
+        axes = {
+            "x": (0, 1),
+            "-x": (0, -1),
+            "y": (1, 1),
+            "-y": (1, -1),
+            "z": (2, 1),
+            "-z": (2, -1),
+        }
+        axes_map = config.getlist("accel_axes_map", ("x", "y", "z"), count=3)
+        self.axes_map = []
+        for a in axes_map:
+            a = a.strip()
+            if a not in axes:
+                raise config.error(
+                    "Invalid accel_axes_map, unknown axes " "'%s'" % (a,)
+                )
+            self.axes_map.append(axes[a])
+
+        self.adxl345_exists = config.has_section("adxl345")
+
+
+class BeaconAccelHelper(object):
+    def __init__(self, beacon, config):
+        self.beacon = beacon
+        self.config = config
+
+        self._api_dump = APIDumpHelper(
+            beacon.printer,
+            lambda: self._start_streaming() or True,
+            lambda _: self._stop_streaming(),
+            self._api_update,
+        )
+        beacon.webhooks.register_endpoint("beacon/dump_accel", self._handle_req_dump)
+        adxl345.AccelCommandHelper(BeaconAccelDummyConfig(beacon.printer, config), self)
+
+        self._stream_en = 0
+        self._raw_samples = []
+        self._sample_lock = threading.Lock()
+
+        beacon._mcu.register_response(self._handle_accel_data, "beacon_accel_data")
+        beacon._mcu.register_response(self._handle_accel_state, "beacon_accel_state")
+
+        self.accel_stream_cmd = beacon._mcu.lookup_command(
+            "beacon_accel_stream en=%c scale=%c", cq=beacon.cmd_queue
+        )
+
+        self._scales = self._fetch_scales()
+        self._scale = self._select_scale()
+        logging.info("Selected Beacon accelerometer scale %s", self._scale["name"])
+
+    def _fetch_scales(self):
+        constants = self.beacon._mcu.get_constants()
+        enum = self.beacon._mcu.get_enumerations().get("beacon_accel_scales", None)
+        if enum is None:
+            return {}
+
+        scales = {}
+        self.default_scale_name = self.config.default_scale
+        first_scale_name = None
+        for name, id in enum.items():
+            try:
+                scale_val_name = "BEACON_ACCEL_SCALE_%s" % (name.upper(),)
+                scale_val_str = constants.get(scale_val_name)
+                scale_val = float(scale_val_str)
+            except:
+                logging.error(
+                    "Beacon accelerometer scale %s could not be " "processed", name
+                )
+                scale_val = 1  # Values will be weird, but scale will work
+
+            if id == 0:
+                first_scale_name = name
+            scales[name] = {"name": name, "id": id, "scale": scale_val}
+
+        if not self.default_scale_name:
+            if first_scale_name is None:
+                logging.error(
+                    "Could not determine default Beacon " "accelerometer scale"
+                )
+            else:
+                self.default_scale_name = first_scale_name
+        elif not self.default_scale_name in scales:
+            logging.error(
+                "Default Beacon accelerometer scale '%s' not found, " " using '%s'",
+                self.default_scale_name,
+                first_scale_name,
+            )
+            self.default_scale_name = first_scale_name
+
+        return scales
+
+    def _select_scale(self):
+        scale = self._scales.get(self.default_scale_name, None)
+        if scale is None:
+            return {"name": "unknown", "id": 0, "scale": 1}
+        return scale
+
+    def _handle_connect(self):
+        # Ensure streaming mode is stopped
+        self.accel_stream_cmd.send([0, 0])
+
+    def _handle_accel_data(self, params):
+        with self._sample_lock:
+            if self._stream_en:
+                self._raw_samples.append(params)
+            else:
+                self.accel_stream_cmd.send([0, 0])
+
+    def _handle_accel_state(self, params):
+        pass
+
+    def _handle_req_dump(self, web_request):
+        cconn = self._api_dump.add_web_client(
+            web_request,
+            lambda buffer: list(
+                itertools.chain(*map(lambda data: data["data"], buffer))
+            ),
+        )
+        cconn.send({"header": ["time", "x", "y", "z"]})
+
+    # Internal helpers
+
+    def _start_streaming(self):
+        if self._stream_en == 0:
+            self.accel_stream_cmd.send([1, self._scale["id"]])
+        self._stream_en += 1
+
+    def _stop_streaming(self):
+        self._stream_en -= 1
+        if self._stream_en == 0:
+            self.accel_stream_cmd.send([0, 0])
+
+    def _clock32_to_time(self, clock):
+        clock64 = self.beacon._mcu.clock32_to_clock64(clock)
+        return self.beacon._mcu.clock_to_print_time(clock64)
+
+    def _process_samples(self, raw_samples):
+        (xp, xs), (yp, ys), (zp, zs) = self.config.axes_map
+        scale = self._scale["scale"] * GRAVITY
+        xs, ys, zs = xs * scale, ys * scale, zs * scale
+
+        errors = 0
+        samples = []
+
+        def process_value(low, high):
+            raw = high << 8 | low
+            if raw == 0x7FFF:
+                return None
+            return raw - ((high & 0x80) << 9)
+
+        for sample in raw_samples:
+            tstart = self._clock32_to_time(sample["clock"])
+            tend = self._clock32_to_time(sample["clock"] + sample["clock_delta"])
+            data = bytearray(sample["data"])
+            count = int(len(data) / ACCEL_BYTES_PER_SAMPLE)
+            dt = (tend - tstart) / (count - 1)
+            for idx in range(0, count):
+                base = idx * ACCEL_BYTES_PER_SAMPLE
+                d = data[base : base + ACCEL_BYTES_PER_SAMPLE]
+                dxl, dxh, dyl, dyh, dzl, dzh = d
+                raw = (
+                    process_value(dxl, dxh),
+                    process_value(dyl, dyh),
+                    process_value(dzl, dzh),
+                )
+                if raw[0] is None or raw[1] is None or raw[2] is None:
+                    errors += 1
+                    samples.append(None)
+                else:
+                    samples.append(
+                        (
+                            tstart + dt * idx,
+                            raw[xp] * xs,
+                            raw[yp] * ys,
+                            raw[zp] * zs,
+                        )
+                    )
+        return (samples, errors)
+
+    # APIDumpHelper callbacks
+
+    def _api_update(self, dump_helper, eventtime):
+        with self._sample_lock:
+            raw_samples = self._raw_samples
+            self._raw_samples = []
+        (samples, errors) = self._process_samples(raw_samples)
+        dump_helper.buffer.append(
+            {
+                "data": samples,
+                "errors": errors,
+                "overflows": 0,
+            }
+        )
+
+    # Accelerometer public interface
+
+    def start_internal_client(self):
+        cli = AccelInternalClient(self.beacon.printer)
+        self._api_dump.add_client(cli._handle_data)
+        return cli
+
+    def read_reg(self, reg):
+        raise self.printer.command_error("Not supported")
+
+    def set_reg(self, reg, val, minclock=0):
+        raise self.printer.command_error("Not supported")
+
+    def is_measuring(self):
+        return self._stream_en > 0
+
+
+class AccelInternalClient:
+    def __init__(self, printer):
+        self.toolhead = printer.lookup_object("toolhead")
+        self.is_finished = False
+        self.request_start_time = (
+            self.request_end_time
+        ) = self.toolhead.get_last_move_time()
+        self.msgs = []
+        self.samples = []
+
+    def _handle_data(self, msgs):
+        if self.is_finished:
+            return False
+        if len(self.msgs) >= 10000:  # Limit capture length
+            return False
+        self.msgs.extend(msgs)
+        return True
+
+    # AccelQueryHelper interface
+
+    def finish_measurements(self):
+        self.request_end_time = self.toolhead.get_last_move_time()
+        self.toolhead.wait_moves()
+        self.is_finished = True
+
+    def has_valid_samples(self):
+        for msg in self.msgs:
+            data = msg["data"]
+            first_sample_time = data[0][0]
+            last_sample_time = data[-1][0]
+            if (
+                first_sample_time > self.request_end_time
+                or last_sample_time < self.request_start_time
+            ):
+                continue
+            return True
+        return False
+
+    def get_samples(self):
+        if not self.msgs:
+            return self.samples
+
+        total = sum([len(m["data"]) for m in self.msgs])
+        count = 0
+        self.samples = samples = [None] * total
+        for msg in self.msgs:
+            for samp_time, x, y, z in msg["data"]:
+                if samp_time < self.request_start_time:
+                    continue
+                if samp_time > self.request_end_time:
+                    break
+                samples[count] = Accel_Measurement(samp_time, x, y, z)
+                count += 1
+        del samples[count:]
+        return self.samples
+
+    write_to_file = adxl345.AccelQueryHelper.write_to_file
+
+
+class APIDumpHelper:
+    def __init__(self, printer, start, stop, update):
+        self.printer = printer
+        self.start = start
+        self.stop = stop
+        self.update = update
+        self.interval = 0.05
+        self.clients = []
+        self.stream = None
+        self.timer = None
+        self.buffer = []
+
+    def _start_stop(self):
+        if not self.stream and self.clients:
+            self.stream = self.start()
+            reactor = self.printer.get_reactor()
+            self.timer = reactor.register_timer(
+                self._process, reactor.monotonic() + self.interval
+            )
+        elif self.stream is not None and not self.clients:
+            self.stop(self.stream)
+            self.stream = None
+            self.printer.get_reactor().unregister_timer(self.timer)
+            self.timer = None
+
+    def _process(self, eventtime):
+        if self.update is not None:
+            self.update(self, eventtime)
+        if self.buffer:
+            for cb in list(self.clients):
+                if not cb(self.buffer):
+                    self.clients.remove(cb)
+                    self._start_stop()
+            self.buffer = []
+        return eventtime + self.interval
+
+    def add_client(self, client):
+        self.clients.append(client)
+        self._start_stop()
+
+    def add_web_client(self, web_request, formatter=lambda v: v):
+        cconn = web_request.get_client_connection()
+        template = web_request.get_dict("response_template", {})
+
+        def cb(items):
+            if cconn.is_closed():
+                return False
+            tmp = dict(template)
+            tmp["params"] = formatter(items)
+            cconn.send(tmp)
+            return True
+
+        self.add_client(cb)
+        return cconn
 
 
 def load_config(config):
