@@ -1397,11 +1397,20 @@ class BeaconMeshHelper:
             count=2, note_valid=False)
         self.rri = mesh_config.getint('relative_reference_index', None,
             note_valid=False)
+        self.zero_ref_pos = mesh_config.getfloatlist("zero_reference_position",
+            None, count=2)
+        self.zero_ref_pos_cluster_size = config.getfloat(
+            "zero_reference_cluster_size", 1, minval=0)
         self.dir = config.getchoice('mesh_main_direction',
-                {'x': 'x', 'X': 'x', 'y': 'y', 'Y': 'y'}, 'y')
+            {'x': 'x', 'X': 'x', 'y': 'y', 'Y': 'y'}, 'y')
         self.overscan = config.getfloat('mesh_overscan', -1, minval=0)
         self.cluster_size = config.getfloat('mesh_cluster_size', 1, minval=0)
         self.runs = config.getint('mesh_runs', 1, minval=1)
+
+        if self.zero_ref_pos is not None and self.rri is not None:
+            logging.info("beacon: both 'zero_reference_position' and "
+                    "'relative_reference_index' options are specified. The"
+                    " former will be used")
 
         self.faulty_regions = []
         for i in list(range(1, 100, 1)):
@@ -1551,6 +1560,20 @@ class BeaconMeshHelper:
             self.min_y, self.max_y = (max(self.max_y, self.def_min_y),
                                       min(self.min_y, self.def_max_y))
 
+        # If the user gave RRI _on gcode_ then use it, else use zero_ref_pos
+        # if we have it, and finally use config RRI if we have it.
+        rri = gcmd.get_int('RELATIVE_REFERENCE_INDEX', None)
+        if rri is not None:
+            self.zero_ref_mode = ("rri", rri)
+        elif self.zero_ref_pos is not None:
+            self.zero_ref_mode = ("pos", self.zero_ref_pos)
+            self.zero_ref_val = None
+            self.zero_ref_bin = []
+        elif self.rri is not None:
+            self.zero_ref_mode = ("rri", self.rri)
+        else:
+            self.zero_ref_mode = None
+
         self.step_x = (self.max_x - self.min_x) / (self.res_x - 1)
         self.step_y = (self.max_y - self.min_y) / (self.res_y - 1)
 
@@ -1574,6 +1597,14 @@ class BeaconMeshHelper:
             self.beacon._sample_printtime_sync(5)
             clusters = self._sample_mesh(gcmd, path, speed, runs)
 
+            if self.zero_ref_mode and self.zero_ref_mode[0] == "pos":
+                # If we didn't collect anything, hop over to the zero point
+                # and sample. Otherwise, grab the median of what we collected.
+                if len(self.zero_ref_bin) == 0:
+                    self._collect_zero_ref(speed, self.zero_ref_mode[1])
+                else:
+                    self.zero_ref_val = median(self.zero_ref_bin)
+
         finally:
             self.beacon._stop_streaming()
 
@@ -1588,11 +1619,21 @@ class BeaconMeshHelper:
                 self.toolhead.manual_move([x, y, None], speed)
         self.toolhead.wait_moves()
 
+    def _collect_zero_ref(self, speed, coord):
+        xo, yo = self.beacon.x_offset, self.beacon.y_offset
+        (x, y) = coord
+        self.toolhead.manual_move([x-xo, y-yo, None], speed)
+        (dist, _samples) = self.beacon._sample(50, 10)
+        self.zero_ref_val = dist
+
     def _is_valid_position(self, x, y):
         return self.min_x <= x <= self.max_x and self.min_y <= y <= self.min_y
 
     def _sample_mesh(self, gcmd, path, speed, runs):
         cs = gcmd.get_float("CLUSTER_SIZE", self.cluster_size, minval=0.)
+        zcs = self.zero_ref_pos_cluster_size
+        if not (self.zero_ref_mode and self.zero_ref_mode[0] == "pos"):
+            zcs = 0
 
         min_x, min_y = self.min_x, self.min_y
         xo, yo = self.beacon.x_offset, self.beacon.y_offset
@@ -1626,6 +1667,15 @@ class BeaconMeshHelper:
                 dist = math.sqrt(dx*dx+dy*dy)
                 if dist > cs:
                     return
+
+            # If we are looking for a zero reference, check if we
+            # are close enough and if so, add to the bin.
+            if zcs > 0:
+                dx = x - self.zero_ref_mode[1][0]
+                dy = y - self.zero_ref_mode[1][1]
+                dist = math.sqrt(dx*dx+dy*dy)
+                if dist <= zcs:
+                    self.zero_ref_bin.append(d)
 
             k = (xi, yi)
 
@@ -1730,15 +1780,19 @@ class BeaconMeshHelper:
                 line.append(median(data))
             matrix.append(line)
 
-        rri = gcmd.get_int('RELATIVE_REFERENCE_INDEX', self.rri)
-        if rri is not None:
+        z_offset = None
+        if self.zero_ref_mode and self.zero_ref_mode[0] == "rri":
+            rri = self.zero_ref_mode[1]
             if rri < 0 or rri >= self.res_x * self.res_y:
                 rri = None
+            if rri is not None:
+                rri_x = rri % self.res_x
+                rri_y = int(math.floor(rri / self.res_x))
+                z_offset = matrix[rri_y][rri_x]
+        elif self.zero_ref_mode and self.zero_ref_mode[0] == "pos":
+            z_offset = td - self.zero_ref_val
 
-        if rri is not None:
-            rri_x = rri % self.res_x
-            rri_y = int(math.floor(rri / self.res_x))
-            z_offset = matrix[rri_y][rri_x]
+        if z_offset is not None:
             for i, line in enumerate(matrix):
                 matrix[i] = [z-z_offset for z in line]
 
