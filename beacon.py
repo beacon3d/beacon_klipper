@@ -557,7 +557,7 @@ class BeaconProbe:
 
                     if len(self._stream_callbacks) > 0:
                         self._enrich_sample(sample)
-                        for cb in self._stream_callbacks.values():
+                        for cb in list(self._stream_callbacks.values()):
                             cb(sample)
             except queue.Empty:
                 return
