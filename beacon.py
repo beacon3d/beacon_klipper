@@ -45,6 +45,7 @@ class BeaconProbe:
         self.trigger_dive_threshold = config.getfloat(
                 'trigger_dive_threshold', 1.)
         self.trigger_hysteresis = config.getfloat('trigger_hysteresis', 0.006)
+        self.z_settling_time = config.getint("z_settling_time", 5, minval=0)
 
         # If using paper for calibration, this would be .1mm
         self.cal_nozzle_z = config.getfloat('cal_nozzle_z', 0.1)
@@ -1281,9 +1282,11 @@ class BeaconEndstopWrapper:
 
         # After homing Z we perform a measurement and adjust the toolhead
         # kinematic position.
-        samples = self.beacon._sample_printtime_sync(5, 10)
+        wait = self.beacon.z_settling_time
+        samples = self.beacon._sample_printtime_sync(wait, 10)
         dist = median([s['dist'] for s in samples])
         if math.isinf(dist):
+            logging.error("Post-homing adjustment measured samples %s", samples)
             raise self.beacon.printer.command_error(
                     "Toolhead stopped below model range")
         homing_state.set_homed_position([None, None, dist])
