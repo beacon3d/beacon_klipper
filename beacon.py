@@ -235,21 +235,17 @@ class BeaconProbe:
         pos[2] = status['axis_minimum'][2]
         try:
             self.phoming.probing_move(self.mcu_probe, pos, speed)
-            samples = self._sample_printtime_sync(50)
+            self._sample_printtime_sync(self.z_settling_time)
         except self.printer.command_error as e:
             reason = str(e)
             if "Timeout during probing move" in reason:
                 reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
 
-    def _sample(self, num_samples):
-        samples = self._sample_printtime_sync(5, num_samples)
-        return (median([s['dist'] for s in samples]), samples)
-
     def _probe(self, speed, num_samples=10, allow_faulty=False):
         target = self.trigger_distance
         tdt = self.trigger_dive_threshold
-        (dist, samples) = self._sample(num_samples)
+        (dist, samples) = self._sample(5, num_samples)
 
         x, y = samples[0]['pos'][0:2]
         if self._is_faulty_coordinate(x, y, True):
@@ -263,7 +259,7 @@ class BeaconProbe:
             # If we are above the dive threshold right now, we'll need to
             # do probing move and then re-measure
             self._probing_move_to_probing_height(speed)
-            (dist, samples) = self._sample(num_samples)
+            (dist, samples) = self._sample(self.z_settling_time, num_samples)
         elif math.isinf(dist) and dist < 0:
             # We were below the valid range of the model
             msg = "Attempted to probe with Beacon below calibrated model range"
@@ -272,7 +268,7 @@ class BeaconProbe:
             # We are below the probing target height, we'll move to the
             # correct height and take a new sample.
             self._move_to_probing_height(speed)
-            (dist, samples) = self._sample(num_samples)
+            (dist, samples) = self._sample(self.z_settling_time, num_samples)
 
         pos = samples[0]['pos']
 
@@ -621,6 +617,10 @@ class BeaconProbe:
         else:
             return samples
 
+    def _sample(self, skip, count):
+        samples = self._sample_printtime_sync(skip, count)
+        return (median([s['dist'] for s in samples]), samples)
+
     def _sample_async(self, count=1):
         samples = []
         def cb(sample):
@@ -702,6 +702,7 @@ class BeaconProbe:
         target = gcmd.get_float('Z', self.trigger_distance)
 
         num_samples = gcmd.get_int('SAMPLES', 20)
+        wait = self.z_settling_time
 
         samples_up = []
         samples_down = []
@@ -711,7 +712,7 @@ class BeaconProbe:
         try:
             self._start_streaming()
 
-            (cur_dist, _samples) = self._sample(10)
+            (cur_dist, _samples) = self._sample(wait, 10)
             pos = self.toolhead.get_position()
             missing = target - cur_dist
             target = pos[2] + missing
@@ -726,7 +727,7 @@ class BeaconProbe:
                 liftpos = [None, None, target]
                 self.toolhead.manual_move(liftpos, lift_speed)
                 self.toolhead.wait_moves()
-                (dist, _samples) = self._sample(10)
+                (dist, _samples) = self._sample(wait, 10)
                 {-1: samples_up, 1: samples_down}[next_dir].append(dist)
                 next_dir = next_dir * -1
 
@@ -1282,9 +1283,7 @@ class BeaconEndstopWrapper:
 
         # After homing Z we perform a measurement and adjust the toolhead
         # kinematic position.
-        wait = self.beacon.z_settling_time
-        samples = self.beacon._sample_printtime_sync(wait, 10)
-        dist = median([s['dist'] for s in samples])
+        (dist, samples) = self.beacon._sample(self.beacon.z_settling_time, 10)
         if math.isinf(dist):
             logging.error("Post-homing adjustment measured samples %s", samples)
             raise self.beacon.printer.command_error(
