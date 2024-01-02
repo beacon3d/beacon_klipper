@@ -1020,36 +1020,16 @@ class BeaconTempModelBuilder:
             if param is not None:
                 self.parameters[key] = param
 
-    def build(self):
-        if self.parameters["fmin"] is None or self.parameters["fmin_temp"] is None:
-            return None
-        logging.info("beacon: built tempco model %s", self.parameters)
-        return BeaconTempModel(**self.parameters)
-
     def build_with_nvm(self, beacon):
-        nvm_data = beacon.beacon_nvm_read_cmd.send([6, 0])
-        (f_count, adc_count) = struct.unpack("<IH", nvm_data["bytes"])
-        if f_count < 0xFFFFFFFF and adc_count < 0xFFFF:
-            if self.parameters["fmin"] is None:
-                self.parameters["fmin"] = beacon.count_to_freq(f_count)
-                logging.info(
-                    "beacon: loaded fmin=%.2f from nvm", self.parameters["fmin"]
-                )
-            if self.parameters["fmin_temp"] is None:
-                temp_adc = (
-                    float(adc_count) / beacon.temp_smooth_count * beacon.inv_adc_max
-                )
-                self.parameters["fmin_temp"] = beacon.thermistor.calc_temp(temp_adc)
-                logging.info(
-                    "beacon: loaded fmin_temp=%.2f from nvm",
-                    self.parameters["fmin_temp"],
-                )
+        nvm_data = beacon.beacon_nvm_read_cmd.send([20, 0])
+        (ver,) = struct.unpack("<Bxxx", nvm_data["bytes"][12:16])
+        if ver == 0x01:
+            return BeaconTempModelV1.build_with_nvm(beacon, self.parameters, nvm_data)
         else:
-            logging.info("beacon: fmin parameters not found in nvm")
-        return self.build()
+            return BeaconTempModelV0.build_with_nvm(beacon, self.parameters, nvm_data)
 
 
-class BeaconTempModel:
+class BeaconTempModelV0:
     def __init__(self, amfg, tcc, tcfl, tctl, fmin, fmin_temp):
         self.amfg = amfg
         self.tcc = tcc
@@ -1057,6 +1037,28 @@ class BeaconTempModel:
         self.tctl = tctl
         self.fmin = fmin
         self.fmin_temp = fmin_temp
+
+    @classmethod
+    def build_with_nvm(cls, beacon, parameters, nvm_data):
+        (f_count, adc_count) = struct.unpack("<IH", nvm_data["bytes"][:6])
+        if f_count < 0xFFFFFFFF and adc_count < 0xFFFF:
+            if parameters["fmin"] is None:
+                parameters["fmin"] = beacon.count_to_freq(f_count)
+                logging.info("beacon: loaded fmin=%.2f from nvm", parameters["fmin"])
+            if parameters["fmin_temp"] is None:
+                temp_adc = (
+                    float(adc_count) / beacon.temp_smooth_count * beacon.inv_adc_max
+                )
+                parameters["fmin_temp"] = beacon.thermistor.calc_temp(temp_adc)
+                logging.info(
+                    "beacon: loaded fmin_temp=%.2f from nvm", parameters["fmin_temp"]
+                )
+        else:
+            logging.info("beacon: parameters not found in nvm")
+        if parameters["fmin"] is None or parameters["fmin_temp"] is None:
+            return None
+        logging.info("beacon: built tempco model version 0 %s", parameters)
+        return cls(**parameters)
 
     def _tcf(self, f, df, dt, tctl):
         tctl = self.tctl if tctl is None else tctl
@@ -1076,6 +1078,67 @@ class BeaconTempModel:
             freq = freq + ferror
             df = freq - (self.fmin + dfmin)
         return self._tcf(freq, df, dt, tctl)
+
+
+class BeaconTempModelV1:
+    def __init__(self, amfg, tcc, tcfl, tctl, fmin, fmin_temp):
+        self.amfg = amfg
+        self.tcc = tcc
+        self.tcfl = tcfl
+        self.tctl = tctl
+        self.fmin = fmin
+        self.fmin_temp = fmin_temp
+
+    @classmethod
+    def build_with_nvm(cls, beacon, parameters, nvm_data):
+        (fnorm, temp, ver, cal) = struct.unpack("<dfBxxxf", nvm_data["bytes"])
+        amfg = cls._amfg(cal)
+        logging.info(
+            "beacon: loaded fnorm=%.2f temp=%.2f amfg=%.3f from nvm", fnorm, temp, amfg
+        )
+        if parameters["amfg"] == 1.0:
+            parameters["amfg"] = amfg
+        amfg = parameters["amfg"]
+        if parameters["fmin"] is None:
+            parameters["fmin"] = fnorm
+        if parameters["fmin_temp"] is None:
+            parameters["fmin_temp"] = temp
+        parameters["tcc"] = cls._tcc(amfg)
+        parameters["tcfl"] = cls._tcfl(amfg)
+        parameters["tctl"] = cls._tctl(amfg)
+        logging.info("beacon: built tempco model version 1 %s", parameters)
+        return cls(**parameters)
+
+    @classmethod
+    def _amfg(cls, cal):
+        return -3 * cal + 6.08660841
+
+    @classmethod
+    def _tcc(cls, amfg):
+        return -1.3145444333476082e-05 * amfg + 6.142916519010881e-06
+
+    @classmethod
+    def _tcfl(cls, amfg):
+        return 0.00018478916784300965 * amfg - 0.0008211578277775643
+
+    @classmethod
+    def _tctl(cls, amfg):
+        return -0.0006829761203506137 * amfg + 0.0026317792448821123
+
+    def _tcf(self, df):
+        return self.tcc + self.tcfl * df + self.tctl * df * df
+
+    def compensate(self, freq, temp_source, temp_target):
+        if self.amfg == 0.0:
+            return freq
+        fnorm = freq / self.fmin
+        dtmin = temp_source - self.fmin_temp
+        tc = self._tcf(fnorm - 1.0)
+        for _ in range(0, 3):
+            fsl = fnorm * (1 + tc * -dtmin)
+            tc = self._tcf(fsl - 1.0)
+        dt = temp_target - temp_source
+        return freq * (1 + tc * dt)
 
 
 class ModelManager:
