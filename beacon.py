@@ -6,6 +6,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import threading
+import multiprocessing
 import logging
 import chelper
 import pins
@@ -202,7 +203,7 @@ class BeaconProbe:
         constants = self._mcu.get_constants()
         if constants.get("BEACON_HAS_ACCEL", 0) == 1:
             logging.info("Enabling Beacon accelerometer")
-            self.accel_helper = BeaconAccelHelper(self, self.accel_config)
+            self.accel_helper = BeaconAccelHelper(self, self.accel_config, constants)
 
     def stats(self, eventtime):
         return False, "%s: coil_temp=%.1f" % (self.name, self.last_temp)
@@ -2142,7 +2143,7 @@ class BeaconAccelConfig(object):
 
 
 class BeaconAccelHelper(object):
-    def __init__(self, beacon, config):
+    def __init__(self, beacon, config, constants):
         self.beacon = beacon
         self.config = config
 
@@ -2157,7 +2158,11 @@ class BeaconAccelHelper(object):
 
         self._stream_en = 0
         self._raw_samples = []
+        self._last_raw_sample = (0, 0, 0)
         self._sample_lock = threading.Lock()
+
+        bits = constants.get("BEACON_ACCEL_BITS")
+        self._clip_values = (2 ** (bits - 1) - 1, -(2 ** (bits - 1)))
 
         beacon._mcu.register_response(self._handle_accel_data, "beacon_accel_data")
         beacon._mcu.register_response(self._handle_accel_state, "beacon_accel_state")
@@ -2166,12 +2171,11 @@ class BeaconAccelHelper(object):
             "beacon_accel_stream en=%c scale=%c", cq=beacon.cmd_queue
         )
 
-        self._scales = self._fetch_scales()
+        self._scales = self._fetch_scales(constants)
         self._scale = self._select_scale()
         logging.info("Selected Beacon accelerometer scale %s", self._scale["name"])
 
-    def _fetch_scales(self):
-        constants = self.beacon._mcu.get_constants()
+    def _fetch_scales(self, constants):
         enum = self.beacon._mcu.get_enumerations().get("beacon_accel_scales", None)
         if enum is None:
             return {}
@@ -2256,7 +2260,8 @@ class BeaconAccelHelper(object):
         clock64 = self.beacon._mcu.clock32_to_clock64(clock)
         return self.beacon._mcu.clock_to_print_time(clock64)
 
-    def _process_samples(self, raw_samples):
+    def _process_samples(self, raw_samples, last_sample):
+        raw = last_sample
         (xp, xs), (yp, ys), (zp, zs) = self.config.axes_map
         scale = self._scale["scale"] * GRAVITY
         xs, ys, zs = xs * scale, ys * scale, zs * scale
@@ -2264,10 +2269,11 @@ class BeaconAccelHelper(object):
         errors = 0
         samples = []
 
-        def process_value(low, high):
+        def process_value(low, high, last_value):
             raw = high << 8 | low
             if raw == 0x7FFF:
-                return None
+                # Clipped value
+                return self._clip_values[0 if last_value >= 0 else 1]
             return raw - ((high & 0x80) << 9)
 
         for sample in raw_samples:
@@ -2281,9 +2287,9 @@ class BeaconAccelHelper(object):
                 d = data[base : base + ACCEL_BYTES_PER_SAMPLE]
                 dxl, dxh, dyl, dyh, dzl, dzh = d
                 raw = (
-                    process_value(dxl, dxh),
-                    process_value(dyl, dyh),
-                    process_value(dzl, dzh),
+                    process_value(dxl, dxh, raw[0]),
+                    process_value(dyl, dyh, raw[1]),
+                    process_value(dzl, dzh, raw[2]),
                 )
                 if raw[0] is None or raw[1] is None or raw[2] is None:
                     errors += 1
@@ -2297,7 +2303,7 @@ class BeaconAccelHelper(object):
                             raw[zp] * zs,
                         )
                     )
-        return (samples, errors)
+        return (samples, errors, raw)
 
     # APIDumpHelper callbacks
 
@@ -2305,7 +2311,10 @@ class BeaconAccelHelper(object):
         with self._sample_lock:
             raw_samples = self._raw_samples
             self._raw_samples = []
-        (samples, errors) = self._process_samples(raw_samples)
+        (samples, errors, last_raw_sample) = self._process_samples(
+            raw_samples, self._last_raw_sample
+        )
+        self._last_raw_sample = last_raw_sample
         dump_helper.buffer.append(
             {
                 "data": samples,
@@ -2387,7 +2396,21 @@ class AccelInternalClient:
         del samples[count:]
         return self.samples
 
-    write_to_file = adxl345.AccelQueryHelper.write_to_file
+    def write_to_file(self, filename):
+        def do_write():
+            try:
+                os.nice(20)
+            except:
+                pass
+            with open(filename, "w") as f:
+                f.write("#time,accel_x,accel_y,accel_z\n")
+                samples = self.samples or self.get_samples()
+                for t, accel_x, accel_y, accel_z in samples:
+                    f.write("%.6f,%.6f,%.6f,%.6f\n" % (t, accel_x, accel_y, accel_z))
+
+        write_proc = multiprocessing.Process(target=do_write)
+        write_proc.daemon = True
+        write_proc.start()
 
 
 class APIDumpHelper:
