@@ -528,7 +528,7 @@ class BeaconProbe:
 
         if pos is None:
             return
-        if self.mod_axis_twist_comp:
+        if sample["dist"] is not None and self.mod_axis_twist_comp:
             sample["dist"] -= self.mod_axis_twist_comp.get_z_compensation_value(pos)
         sample["pos"] = pos
         sample["vel"] = vel
