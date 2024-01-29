@@ -95,6 +95,8 @@ class BeaconProbe:
             config.getfloat("filter_beta", 0.000001),
         )
         self.trapq = None
+        self._last_trapq_move = None
+        self.mod_axis_twist_comp = None
 
         mainsync = self.printer.lookup_object("mcu")._clocksync
         self._mcu = MCU(config, SecondarySync(self.reactor, mainsync))
@@ -154,6 +156,9 @@ class BeaconProbe:
 
     def _handle_connect(self):
         self.phoming = self.printer.lookup_object("homing")
+        self.mod_axis_twist_comp = self.printer.lookup_object(
+            "axis_twist_compensation", None
+        )
 
         # Ensure streaming mode is stopped
         self.beacon_stream_cmd.send([0])
@@ -206,7 +211,11 @@ class BeaconProbe:
             self.accel_helper = BeaconAccelHelper(self, self.accel_config, constants)
 
     def stats(self, eventtime):
-        return False, "%s: coil_temp=%.1f" % (self.name, self.last_temp)
+        return False, "%s: coil_temp=%.1f refs=%s" % (
+            self.name,
+            self.last_temp,
+            self._stream_en,
+        )
 
     def _api_dump_callback(self, sample):
         tmp = [sample.get(key, None) for key in API_DUMP_FIELDS]
@@ -514,6 +523,8 @@ class BeaconProbe:
 
         if pos is None:
             return
+        if self.mod_axis_twist_comp:
+            sample["dist"] -= self.mod_axis_twist_comp.get_z_compensation_value(pos)
         sample["pos"] = pos
         sample["vel"] = vel
 
@@ -634,12 +645,20 @@ class BeaconProbe:
         self._stream_flush_schedule()
 
     def _get_trapq_position(self, print_time):
-        ffi_main, ffi_lib = chelper.get_ffi()
-        data = ffi_main.new("struct pull_move[1]")
-        count = ffi_lib.trapq_extract_old(self.trapq, data, 1, 0.0, print_time)
-        if not count:
-            return None, None
-        move = data[0]
+        move = None
+        if self._last_trapq_move:
+            last = self._last_trapq_move
+            last_end = last.print_time + last.move_t
+            if last.print_time <= print_time <= last_end:
+                move = last
+        if move is None:
+            ffi_main, ffi_lib = chelper.get_ffi()
+            data = ffi_main.new("struct pull_move[1]")
+            count = ffi_lib.trapq_extract_old(self.trapq, data, 1, 0.0, print_time)
+            if not count:
+                return None, None
+            move = data[0]
+        self._last_trapq_move = move
         move_time = max(0.0, min(move.move_t, print_time - move.print_time))
         dist = (move.start_v + 0.5 * move.accel * move_time) * move_time
         pos = (
@@ -947,9 +966,9 @@ class BeaconProbe:
         self.model.offset += offset
         self.model.save(self, False)
         gcmd.respond_info(
-            "Beacon model offset has been updated\n"
+            "Beacon model offset has been updated, new value is %.5f\n"
             "You must run the SAVE_CONFIG command now to update the\n"
-            "printer config file and restart the printer."
+            "printer config file and restart the printer." % (self.model.offset,)
         )
         self.model.offset = old_offset
 
@@ -1844,6 +1863,7 @@ class BeaconMeshHelper:
             p = path if i % 2 == 0 else reversed(path)
             for x, y in p:
                 self.toolhead.manual_move([x, y, None], speed)
+        self.toolhead.dwell(0.251)
         self.toolhead.wait_moves()
 
     def _collect_zero_ref(self, speed, coord):
