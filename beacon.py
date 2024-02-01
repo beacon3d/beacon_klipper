@@ -1791,7 +1791,7 @@ class BeaconMeshHelper:
         self.min_x, self.min_y = coord_fallback(
             gcmd,
             "MESH_MIN",
-            float,
+            float_parse,
             self.def_min_x,
             self.def_min_y,
             lambda v, d: max(v, d),
@@ -1799,7 +1799,7 @@ class BeaconMeshHelper:
         self.max_x, self.max_y = coord_fallback(
             gcmd,
             "MESH_MAX",
-            float,
+            float_parse,
             self.def_max_x,
             self.def_max_y,
             lambda v, d: min(v, d),
@@ -2232,6 +2232,11 @@ def coord_fallback(gcmd, name, parse, def_x, def_y, map=lambda v, d: v):
     else:
         return def_x, def_y
 
+def float_parse(s):
+    v = float(s)
+    if math.isinf(v) or math.isnan(v):
+        raise ValueError("could not convert string to float: '%s'" % (s,))
+    return v
 
 def median(samples):
     return float(np.median(samples))
