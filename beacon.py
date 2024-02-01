@@ -654,7 +654,7 @@ class BeaconProbe:
         if self._last_trapq_move:
             last = self._last_trapq_move
             last_end = last.print_time + last.move_t
-            if last.print_time <= print_time <= last_end:
+            if last.print_time <= print_time < last_end:
                 move = last
         if move is None:
             ffi_main, ffi_lib = chelper.get_ffi()
