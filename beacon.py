@@ -652,7 +652,7 @@ class BeaconProbe:
     def _get_trapq_position(self, print_time):
         move = None
         if self._last_trapq_move:
-            last = self._last_trapq_move
+            last = self._last_trapq_move[0]
             last_end = last.print_time + last.move_t
             if last.print_time <= print_time < last_end:
                 move = last
@@ -662,8 +662,8 @@ class BeaconProbe:
             count = ffi_lib.trapq_extract_old(self.trapq, data, 1, 0.0, print_time)
             if not count:
                 return None, None
+            self._last_trapq_move = data
             move = data[0]
-        self._last_trapq_move = move
         move_time = max(0.0, min(move.move_t, print_time - move.print_time))
         dist = (move.start_v + 0.5 * move.accel * move_time) * move_time
         pos = (
