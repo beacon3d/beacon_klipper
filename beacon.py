@@ -2081,9 +2081,9 @@ class BeaconMeshHelper:
             x += dx
             y += dy
             while x >= 0 and x <= xi_max and y >= 0 and y <= yi_max:
-                if clusters[(x, y)] is not None:
+                if clusters.get((x, y), None) is not None:
                     return (
-                        abs(x - start[0]) + abs(y - start[0]),
+                        abs(x - start[0]) + abs(y - start[1]),
                         median(clusters[(x, y)]),
                     )
                 x += dx
@@ -2232,11 +2232,13 @@ def coord_fallback(gcmd, name, parse, def_x, def_y, map=lambda v, d: v):
     else:
         return def_x, def_y
 
+
 def float_parse(s):
     v = float(s)
     if math.isinf(v) or math.isnan(v):
         raise ValueError("could not convert string to float: '%s'" % (s,))
     return v
+
 
 def median(samples):
     return float(np.median(samples))
