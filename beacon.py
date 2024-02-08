@@ -839,7 +839,7 @@ class BeaconProbe:
             "time": sample["time"],
             "value": last_value,
             "temp": temp,
-            "dist": None if np.isinf(dist) or np.isnan(dist) else dist,
+            "dist": None if dist is None or np.isinf(dist) or np.isnan(dist) else dist,
         }
         if dist is None:
             gcmd.respond_info(
