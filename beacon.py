@@ -209,7 +209,12 @@ class BeaconProbe:
         constants = self._mcu.get_constants()
         if constants.get("BEACON_HAS_ACCEL", 0) == 1:
             logging.info("Enabling Beacon accelerometer")
-            self.accel_helper = BeaconAccelHelper(self, self.accel_config, constants)
+            if self.accel_helper is None:
+                self.accel_helper = BeaconAccelHelper(
+                    self, self.accel_config, constants
+                )
+            else:
+                self.accel_helper.reinit(constants)
 
     def stats(self, eventtime):
         return False, "%s: coil_temp=%.1f refs=%s" % (
@@ -2322,14 +2327,17 @@ class BeaconAccelHelper(object):
         self._last_raw_sample = (0, 0, 0)
         self._sample_lock = threading.Lock()
 
-        bits = constants.get("BEACON_ACCEL_BITS")
-        self._clip_values = (2 ** (bits - 1) - 1, -(2 ** (bits - 1)))
-
         beacon._mcu.register_response(self._handle_accel_data, "beacon_accel_data")
         beacon._mcu.register_response(self._handle_accel_state, "beacon_accel_state")
 
-        self.accel_stream_cmd = beacon._mcu.lookup_command(
-            "beacon_accel_stream en=%c scale=%c", cq=beacon.cmd_queue
+        self.reinit(constants)
+
+    def reinit(self, constants):
+        bits = constants.get("BEACON_ACCEL_BITS")
+        self._clip_values = (2 ** (bits - 1) - 1, -(2 ** (bits - 1)))
+
+        self.accel_stream_cmd = self.beacon._mcu.lookup_command(
+            "beacon_accel_stream en=%c scale=%c", cq=self.beacon.cmd_queue
         )
 
         self._scales = self._fetch_scales(constants)
