@@ -75,6 +75,7 @@ class BeaconProbe:
         self.measured_max = 0.0
 
         self.last_sample = None
+        self.last_received_sample = None
         self.hardware_failure = None
 
         self.mesh_helper = BeaconMeshHelper.create(self, config)
@@ -598,6 +599,7 @@ class BeaconProbe:
             try:
                 samples = self._stream_samples_queue.get_nowait()
                 updated_timer = False
+                last = None
                 for sample in samples:
                     if not updated_timer:
                         curtime = self.reactor.monotonic()
@@ -630,6 +632,9 @@ class BeaconProbe:
                         self._enrich_sample(sample)
                         for cb in list(self._stream_callbacks.values()):
                             cb(sample)
+                    last = sample
+                if last is not None:
+                    self.last_received_sample = last
             except queue.Empty:
                 return
 
@@ -744,6 +749,7 @@ class BeaconProbe:
             model = self.model.name
         return {
             "last_sample": self.last_sample,
+            "last_received_sample": self.last_received_sample,
             "model": model,
         }
 
