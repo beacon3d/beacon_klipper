@@ -7,6 +7,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import threading
 import multiprocessing
+import importlib
 import traceback
 import logging
 import chelper
@@ -1609,6 +1610,7 @@ class BeaconMeshHelper:
 
     def __init__(self, beacon, config, mesh_config):
         self.beacon = beacon
+        self.scipy = None
         self.mesh_config = mesh_config
         self.bm = self.beacon.printer.load_object(mesh_config, "bed_mesh")
 
@@ -1961,6 +1963,16 @@ class BeaconMeshHelper:
     def _is_valid_position(self, x, y):
         return self.min_x <= x <= self.max_x and self.min_y <= y <= self.min_y
 
+    def _is_faulty_coordinate(self, x, y, add_offsets=False):
+        if add_offsets:
+            xo, yo = self.beacon.x_offset, self.beacon.y_offset
+            x += xo
+            y += yo
+        for r in self.faulty_regions:
+            if r.is_point_within(x, y):
+                return True
+        return False
+
     def _sample_mesh(self, gcmd, path, speed, runs):
         cs = gcmd.get_float("CLUSTER_SIZE", self.cluster_size, minval=0.0)
         zcs = self.zero_ref_pos_cluster_size
@@ -1989,6 +2001,8 @@ class BeaconMeshHelper:
             # Calculate coordinate of the cluster we are in
             xi = int(round((x - min_x) / self.step_x))
             yi = int(round((y - min_y) / self.step_y))
+            if xi < 0 or self.res_x <= xi or yi < 0 or self.res_y <= yi:
+                return
 
             # If there's a cluster size limit, apply it here
             if cs > 0:
@@ -2031,10 +2045,13 @@ class BeaconMeshHelper:
 
     def _process_clusters(self, raw_clusters, gcmd):
         parent_conn, child_conn = multiprocessing.Pipe()
+        dump_file = gcmd.get("FILENAME", None)
 
         def do():
             try:
-                child_conn.send((False, self._do_process_clusters(raw_clusters)))
+                child_conn.send(
+                    (False, self._do_process_clusters(raw_clusters, dump_file))
+                )
             except:
                 child_conn.send((True, traceback.format_exc()))
             child_conn.close()
@@ -2058,103 +2075,114 @@ class BeaconMeshHelper:
             else:
                 return inner_result
 
-    def _do_process_clusters(self, raw_clusters):
-        clusters = self._interpolate_faulty(raw_clusters)
-        return self._generate_matrix(clusters)
+    def _do_process_clusters(self, raw_clusters, dump_file):
+        if dump_file:
+            with open(dump_file, "w") as f:
+                f.write("x,y,xp,xy,dist\n")
+                for yi in range(self.res_y):
+                    line = []
+                    for xi in range(self.res_x):
+                        cluster = raw_clusters.get((xi, yi), [])
+                        xp = xi * self.step_x + self.min_x
+                        yp = yi * self.step_y + self.min_y
+                        for dist in cluster:
+                            f.write("%d,%d,%f,%f,%f\n" % (xi, yi, xp, yp, dist))
 
-    def _is_faulty_coordinate(self, x, y, add_offsets=False):
-        if add_offsets:
-            xo, yo = self.beacon.x_offset, self.beacon.y_offset
-            x += xo
-            y += yo
-        for r in self.faulty_regions:
-            if r.is_point_within(x, y):
-                return True
-        return False
+        mask = self._generate_fault_mask()
+        matrix, faulty_regions = self._generate_matrix(raw_clusters, mask)
+        if len(faulty_regions) > 0:
+            (error, interpolator_or_msg) = self._load_interpolator()
+            if error:
+                return (True, interpolator_or_msg)
+            matrix = self._interpolate_faulty(
+                matrix, faulty_regions, interpolator_or_msg
+            )
+        err = self._check_matrix(matrix)
+        if err is not None:
+            return (True, err)
+        return (False, self._finalize_matrix(matrix))
 
-    def _interpolate_faulty(self, clusters):
-        faulty_indexes = []
-        xi_max = 0
-        yi_max = 0
-        for (xi, yi), points in clusters.items():
-            if xi > xi_max:
-                xi_max = xi
-            if yi > yi_max:
-                yi_max = yi
-            xc = xi * self.step_x + self.min_x
-            yc = yi * self.step_y + self.min_y
-            if self._is_faulty_coordinate(xc, yc):
-                clusters[(xi, yi)] = None
-                faulty_indexes.append((xi, yi))
-
-        def get_nearest(start, dx, dy):
-            (x, y) = start
-            x += dx
-            y += dy
-            while x >= 0 and x <= xi_max and y >= 0 and y <= yi_max:
-                if clusters.get((x, y), None) is not None:
-                    return (
-                        abs(x - start[0]) + abs(y - start[1]),
-                        median(clusters[(x, y)]),
-                    )
-                x += dx
-                y += dy
+    def _generate_fault_mask(self):
+        if len(self.faulty_regions) == 0:
             return None
+        mask = np.full((self.res_y, self.res_x), True)
+        for r in self.faulty_regions:
+            r_xmin = int(math.ceil((r.x_min - self.min_x) / self.step_x))
+            r_ymin = int(math.ceil((r.y_min - self.min_y) / self.step_y))
+            r_xmax = int(math.floor((r.x_max - self.min_x) / self.step_x))
+            r_ymax = int(math.floor((r.y_max - self.min_y) / self.step_y))
+            for y in range(r_ymin, r_ymax + 1):
+                for x in range(r_xmin, r_xmax + 1):
+                    mask[(y, x)] = False
+        return mask
 
-        def interp_weighted(lower, higher):
-            if lower is None and higher is None:
-                return None
-            if lower is None and higher is not None:
-                return higher[1]
-            elif lower is not None and higher is None:
-                return lower[1]
+    def _generate_matrix(self, raw_clusters, mask):
+        faulty_indexes = []
+        matrix = np.empty((self.res_y, self.res_x))
+        for (x, y), values in raw_clusters.items():
+            if mask is None or mask[(y, x)]:
+                matrix[(y, x)] = self.beacon.trigger_distance - median(values)
             else:
-                return (lower[1] * lower[0] + higher[1] * higher[0]) / (
-                    lower[0] + higher[0]
+                matrix[(y, x)] = np.nan
+                faulty_indexes.append((y, x))
+        return matrix, faulty_indexes
+
+    def _load_interpolator(self):
+        if not self.scipy:
+            try:
+                self.scipy = importlib.import_module("scipy")
+            except ImportError:
+                msg = (
+                    "Could not load `scipy`. To install it, simply re-run "
+                    "the Beacon `install.sh` script. This module is required "
+                    "when using faulty regions when bed meshing."
+                )
+                return (True, msg)
+        if hasattr(self.scipy.interpolate, "RBFInterpolator"):
+
+            def rbf_interp(points, values, faulty):
+                return self.scipy.interpolate.RBFInterpolator(points, values, 64)(
+                    faulty
                 )
 
-        for coord in faulty_indexes:
-            xl = get_nearest(coord, -1, 0)
-            xh = get_nearest(coord, 1, 0)
-            xavg = interp_weighted(xl, xh)
-            yl = get_nearest(coord, 0, -1)
-            yh = get_nearest(coord, 0, 1)
-            yavg = interp_weighted(yl, yh)
-            avg = None
-            if xavg is not None and yavg is None:
-                avg = xavg
-            elif xavg is None and yavg is not None:
-                avg = yavg
-            else:
-                avg = (xavg + yavg) / 2.0
-            clusters[coord] = [avg]
+            return (False, rbf_interp)
+        else:
 
-        return clusters
+            def linear_interp(points, values, faulty):
+                return self.scipy.interpolate.griddata(
+                    points, values, faulty, method="linear"
+                )
 
-    def _generate_matrix(self, clusters):
-        matrix = []
-        td = self.beacon.trigger_distance
+            return (False, linear_interp)
+
+    def _interpolate_faulty(self, matrix, faulty_indexes, interpolator):
+        ys, xs = np.mgrid[0 : matrix.shape[0], 0 : matrix.shape[1]]
+        points = np.array([ys.flatten(), xs.flatten()]).T
+        values = matrix.reshape(-1)
+        good = ~np.isnan(values)
+        fixed = interpolator(points[good], values[good], faulty_indexes)
+        matrix[tuple(np.array(faulty_indexes).T)] = fixed
+        return matrix
+
+    def _check_matrix(self, matrix):
         empty_clusters = []
         for yi in range(self.res_y):
-            line = []
             for xi in range(self.res_x):
-                cluster = clusters.get((xi, yi), None)
-                if cluster is None or len(cluster) == 0:
+                if np.isnan(matrix[(yi, xi)]):
                     xc = xi * self.step_x + self.min_x
                     yc = yi * self.step_y + self.min_y
                     empty_clusters.append("  (%.3f,%.3f)[%d,%d]" % (xc, yc, xi, yi))
-                else:
-                    data = [td - d for d in cluster]
-                    line.append(median(data))
-            matrix.append(line)
         if empty_clusters:
             err = (
                 "Empty clusters found\n"
                 "Try increasing mesh cluster_size or slowing down.\n"
                 "The following clusters were empty:\n"
             ) + "\n".join(empty_clusters)
-            return (True, err)
+            return err
+        else:
+            return None
 
+    def _finalize_matrix(self, matrix):
         z_offset = None
         if self.zero_ref_mode and self.zero_ref_mode[0] == "rri":
             rri = self.zero_ref_mode[1]
@@ -2165,12 +2193,11 @@ class BeaconMeshHelper:
                 rri_y = int(math.floor(rri / self.res_x))
                 z_offset = matrix[rri_y][rri_x]
         elif self.zero_ref_mode and self.zero_ref_mode[0] == "pos":
-            z_offset = td - self.zero_ref_val
+            z_offset = self.beacon.trigger_distance - self.zero_ref_val
 
         if z_offset is not None:
-            for i, line in enumerate(matrix):
-                matrix[i] = [z - z_offset for z in line]
-        return (False, matrix)
+            matrix = matrix - z_offset
+        return matrix.tolist()
 
     def _apply_mesh(self, matrix, gcmd):
         params = self.bm.bmc.mesh_config
@@ -2246,7 +2273,7 @@ def coord_fallback(gcmd, name, parse, def_x, def_y, map=lambda v, d: v):
 
 def float_parse(s):
     v = float(s)
-    if math.isinf(v) or math.isnan(v):
+    if math.isinf(v) or np.isnan(v):
         raise ValueError("could not convert string to float: '%s'" % (s,))
     return v
 
