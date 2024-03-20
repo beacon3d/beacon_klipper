@@ -635,6 +635,10 @@ class BeaconProbe:
                             cb(sample)
                     last = sample
                 if last is not None:
+                    last = last.copy()
+                    dist = last["dist"]
+                    if dist is None or np.isinf(dist) or np.isnan(dist):
+                        del last["dist"]
                     self.last_received_sample = last
             except queue.Empty:
                 return
