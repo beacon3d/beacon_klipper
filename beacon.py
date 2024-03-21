@@ -529,17 +529,6 @@ class BeaconProbe:
         sample["freq"] = self.count_to_freq(sample["data_smooth"])
         self._check_hardware(sample)
 
-    def _enrich_sample(self, sample):
-        sample["dist"] = self.freq_to_dist(sample["freq"], sample["temp"])
-        pos, vel = self._get_trapq_position(sample["time"])
-
-        if pos is None:
-            return
-        if sample["dist"] is not None and self.mod_axis_twist_comp:
-            sample["dist"] -= self.mod_axis_twist_comp.get_z_compensation_value(pos)
-        sample["pos"] = pos
-        sample["vel"] = vel
-
     def _start_streaming(self):
         if self._stream_en == 0:
             self.beacon_stream_cmd.send([1])
@@ -613,8 +602,8 @@ class BeaconProbe:
                     temp = sample["temp"]
                     if self.model_temp is not None and not (-40 < temp < 180):
                         msg = (
-                            "Beacon temperature sensor faulty(read %.2f C),"
-                            " disabling temperaure compensation" % (temp,)
+                            "Beacon temperature sensor faulty(read %.2f C), "
+                            "disabling temperature compensation" % (temp,)
                         )
                         logging.error(msg)
                         self.gcode.respond_raw("!! " + msg + "\n")
@@ -629,11 +618,22 @@ class BeaconProbe:
                     self._data_filter.update(sample["time"], sample["data"])
                     self._enrich_sample_freq(sample)
 
+                    dist = self.freq_to_dist(sample["freq"], sample["temp"])
+                    pos, vel = self._get_trapq_position(sample["time"])
+                    if pos is not None:
+                        if dist is not None and self.mod_axis_twist_comp:
+                            dist -= self.mod_axis_twist_comp.get_z_compensation_value(
+                                pos
+                            )
+                        sample["pos"] = pos
+                        sample["vel"] = vel
+                    sample["dist"] = dist
+
                     if len(self._stream_callbacks) > 0:
-                        self._enrich_sample(sample)
                         for cb in list(self._stream_callbacks.values()):
                             cb(sample)
                     last = sample
+
                 if last is not None:
                     last = last.copy()
                     dist = last["dist"]
