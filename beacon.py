@@ -529,6 +529,17 @@ class BeaconProbe:
         sample["freq"] = self.count_to_freq(sample["data_smooth"])
         self._check_hardware(sample)
 
+    def _enrich_sample(self, sample):
+        sample["dist"] = self.freq_to_dist(sample["freq"], sample["temp"])
+        pos, vel = self._get_trapq_position(sample["time"])
+
+        if pos is None:
+            return
+        if sample["dist"] is not None and self.mod_axis_twist_comp:
+            sample["dist"] -= self.mod_axis_twist_comp.get_z_compensation_value(pos)
+        sample["pos"] = pos
+        sample["vel"] = vel
+
     def _start_streaming(self):
         if self._stream_en == 0:
             self.beacon_stream_cmd.send([1])
@@ -617,17 +628,7 @@ class BeaconProbe:
                     self._enrich_sample_time(sample)
                     self._data_filter.update(sample["time"], sample["data"])
                     self._enrich_sample_freq(sample)
-
-                    dist = self.freq_to_dist(sample["freq"], sample["temp"])
-                    pos, vel = self._get_trapq_position(sample["time"])
-                    if pos is not None:
-                        if dist is not None and self.mod_axis_twist_comp:
-                            dist -= self.mod_axis_twist_comp.get_z_compensation_value(
-                                pos
-                            )
-                        sample["pos"] = pos
-                        sample["vel"] = vel
-                    sample["dist"] = dist
+                    self._enrich_sample(sample)
 
                     if len(self._stream_callbacks) > 0:
                         for cb in list(self._stream_callbacks.values()):
@@ -690,8 +691,7 @@ class BeaconProbe:
         return pos, velocity
 
     def _sample_printtime_sync(self, skip=0, count=1):
-        toolhead = self.printer.lookup_object("toolhead")
-        move_time = toolhead.get_last_move_time()
+        move_time = self.toolhead.get_last_move_time()
         settle_clock = self._mcu.print_time_to_clock(move_time)
         samples = []
         total = skip + count
