@@ -98,7 +98,6 @@ class BeaconProbe:
             config.getfloat("filter_beta", 0.000001),
         )
         self.trapq = None
-        self._last_trapq_move = None
         self.mod_axis_twist_comp = None
 
         mainsync = self.printer.lookup_object("mcu")._clocksync
@@ -634,7 +633,6 @@ class BeaconProbe:
                         for cb in list(self._stream_callbacks.values()):
                             cb(sample)
                     last = sample
-
                 if last is not None:
                     last = last.copy()
                     dist = last["dist"]
@@ -666,20 +664,12 @@ class BeaconProbe:
         self._stream_flush_schedule()
 
     def _get_trapq_position(self, print_time):
-        move = None
-        if self._last_trapq_move:
-            last = self._last_trapq_move[0]
-            last_end = last.print_time + last.move_t
-            if last.print_time <= print_time < last_end:
-                move = last
-        if move is None:
-            ffi_main, ffi_lib = chelper.get_ffi()
-            data = ffi_main.new("struct pull_move[1]")
-            count = ffi_lib.trapq_extract_old(self.trapq, data, 1, 0.0, print_time)
-            if not count:
-                return None, None
-            self._last_trapq_move = data
-            move = data[0]
+        ffi_main, ffi_lib = chelper.get_ffi()
+        data = ffi_main.new("struct pull_move[1]")
+        count = ffi_lib.trapq_extract_old(self.trapq, data, 1, 0.0, print_time)
+        if not count:
+            return None, None
+        move = data[0]
         move_time = max(0.0, min(move.move_t, print_time - move.print_time))
         dist = (move.start_v + 0.5 * move.accel * move_time) * move_time
         pos = (
