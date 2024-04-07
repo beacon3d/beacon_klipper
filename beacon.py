@@ -1987,7 +1987,7 @@ class BeaconMeshHelper:
             x += xo
             y += yo
 
-            if math.isinf(d):
+            if d is None or math.isinf(d):
                 if self._is_valid_position(x, y):
                     invalid_samples[0] += 1
                 return
@@ -2101,10 +2101,10 @@ class BeaconMeshHelper:
             return None
         mask = np.full((self.res_y, self.res_x), True)
         for r in self.faulty_regions:
-            r_xmin = int(math.ceil((r.x_min - self.min_x) / self.step_x))
-            r_ymin = int(math.ceil((r.y_min - self.min_y) / self.step_y))
-            r_xmax = int(math.floor((r.x_max - self.min_x) / self.step_x))
-            r_ymax = int(math.floor((r.y_max - self.min_y) / self.step_y))
+            r_xmin = max(0, int(math.ceil((r.x_min - self.min_x) / self.step_x)))
+            r_ymin = max(0, int(math.ceil((r.y_min - self.min_y) / self.step_y)))
+            r_xmax = min(self.res_x-1, int(math.floor((r.x_max - self.min_x) / self.step_x)))
+            r_ymax = min(self.res_y-1, int(math.floor((r.y_max - self.min_y) / self.step_y)))
             for y in range(r_ymin, r_ymax + 1):
                 for x in range(r_xmin, r_xmax + 1):
                     mask[(y, x)] = False
