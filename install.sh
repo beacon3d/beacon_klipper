@@ -26,3 +26,6 @@ if ! grep -q "klippy/extras/beacon.py" "${KDIR}/.git/info/exclude"; then
     echo "klippy/extras/beacon.py" >> "${KDIR}/.git/info/exclude"
 fi
 echo "beacon: installation successful."
+
+echo "Updating firmware."
+"$KENV/bin/python" "$BKDIR/update_firmware.py" update all
