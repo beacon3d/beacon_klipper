@@ -64,6 +64,7 @@ class BeaconProbe:
         self.cal_speed = config.getfloat("cal_speed", 1.0)
         self.cal_move_speed = config.getfloat("cal_move_speed", 10.0)
 
+        self.autocal_max_speed = config.getfloat("autocal_max_speed", 10)
         self.autocal_speed = config.getfloat("autocal_speed", 3)
         self.autocal_accel = config.getfloat("autocal_accel", 100)
         self.autocal_retract_dist = config.getfloat("autocal_retract_dist", 2)
@@ -477,7 +478,9 @@ class BeaconProbe:
 
     def _run_probe_contact(self, gcmd):
         self.toolhead.wait_moves()
-        speed = gcmd.get_float("PROBE_SPEED", self.autocal_speed, above=0.0)
+        speed = gcmd.get_float(
+            "PROBE_SPEED", self.autocal_speed, above=0.0, maxval=self.autocal_max_speed
+        )
         lift_speed = self.get_lift_speed(gcmd)
         sample_count = gcmd.get_int("SAMPLES", self.autocal_sample_count, minval=1)
         retract_dist = gcmd.get_float(
@@ -1270,10 +1273,12 @@ class BeaconProbe:
     def cmd_BEACON_POKE(self, gcmd):
         top = gcmd.get_float("TOP", 5)
         bottom = gcmd.get_float("BOTTOM", -0.3)
-        speed = gcmd.get_float("SPEED", 3)
+        speed = gcmd.get_float("SPEED", 3, maxval=self.autocal_max_speed)
 
+        pos = self.toolhead.get_position()
         gcmd.respond_info(
-            "Poke test from %.3f to %.3f, at %.3f mm/s" % (top, bottom, speed)
+            "Poke test at (%.3f,%.3f), from %.3f to %.3f, at %.3f mm/s"
+            % (pos[0], pos[1], top, bottom, speed)
         )
 
         self.last_probe_result = "failed"
@@ -1341,7 +1346,9 @@ class BeaconProbe:
     cmd_BEACON_AUTO_CALIBRATE_help = "Automatically calibrates the Beacon probe"
 
     def cmd_BEACON_AUTO_CALIBRATE(self, gcmd):
-        speed = gcmd.get_float("SPEED", self.autocal_speed, minval=0.1)
+        speed = gcmd.get_float(
+            "SPEED", self.autocal_speed, above=0, maxval=self.autocal_max_speed
+        )
         desired_accel = gcmd.get_float("ACCEL", self.autocal_accel, minval=1)
         retract_dist = gcmd.get_float("RETRACT", self.autocal_retract_dist, minval=1)
         retract_speed = gcmd.get_float(
@@ -1376,6 +1383,8 @@ class BeaconProbe:
         def set_max_accel(value):
             gcode.run_script_from_command("SET_VELOCITY_LIMIT ACCEL=%.3f" % (value,))
 
+        homing_state = BeaconHomingState()
+        self.printer.send_event("homing:home_rails_begin", homing_state, [])
         self.mcu_contact_probe.activate_gcode.run_gcode_from_command()
         try:
             self.toolhead.set_position(force_pos, [2])
@@ -1446,7 +1455,8 @@ class BeaconProbe:
             self.toolhead.wait_moves()
             self.toolhead.flush_step_generation()
             self.last_probe_result = "ok"
-            if gcmd.get("SKIP_MODEL_CREATION", None) is None:
+            self.printer.send_event("homing:home_rails_end", homing_state, [])
+            if gcmd.get_int("SKIP_MODEL_CREATION", 0) == 0:
                 self._calibrate(gcmd, force_pos, force_pos[2], True, True)
 
         except self.printer.command_error:
@@ -2241,9 +2251,11 @@ HOMING_AUTOCAL_CALIBRATE_CHOICES = {
 }
 HOMING_AUTOCAL_METHOD_CONTACT = 0
 HOMING_AUTOCAL_METHOD_PROXIMITY = 1
+HOMING_AUTOCAL_METHOD_PROXIMITY_IF_AVAILABLE = 2
 HOMING_AUTOCAL_METHOD_CHOICES = {
     "contact": HOMING_AUTOCAL_METHOD_CONTACT,
     "proximity": HOMING_AUTOCAL_METHOD_PROXIMITY,
+    "proximity_if_available": HOMING_AUTOCAL_METHOD_PROXIMITY_IF_AVAILABLE,
 }
 HOMING_AUTOCAL_CHOICES_METHOD = {v: k for k, v in HOMING_AUTOCAL_METHOD_CHOICES.items()}
 
@@ -2260,7 +2272,7 @@ class BeaconHomingHelper:
         self.beacon = beacon
         self.home_pos = home_xy_position
 
-        for section in ["safe_z_homing", "homing_override"]:
+        for section in ["safe_z_home", "homing_override"]:
             if config.has_section(section):
                 raise config.error(
                     "home_xy_position cannot be used with [%s]" % (section,)
@@ -2282,12 +2294,12 @@ class BeaconHomingHelper:
         )
 
         gcode_macro = beacon.printer.load_object(config, "gcode_macro")
-        self.template_pre_xy = gcode_macro.load_template(
-            config, "home_gcode_pre_xy", ""
-        )
-        self.template_post_xy = gcode_macro.load_template(
-            config, "home_gcode_post_xy", ""
-        )
+        self.tmpl_pre_xy = gcode_macro.load_template(config, "home_gcode_pre_xy", "")
+        self.tmpl_post_xy = gcode_macro.load_template(config, "home_gcode_post_xy", "")
+        self.tmpl_pre_x = gcode_macro.load_template(config, "home_gcode_pre_x", "")
+        self.tmpl_post_x = gcode_macro.load_template(config, "home_gcode_post_x", "")
+        self.tmpl_pre_y = gcode_macro.load_template(config, "home_gcode_pre_y", "")
+        self.tmpl_post_y = gcode_macro.load_template(config, "home_gcode_post_y", "")
 
         # Ensure homing is loaded so we can override G28
         beacon.printer.load_object(config, "homing")
@@ -2314,15 +2326,10 @@ class BeaconHomingHelper:
                 toolhead.manual_move(move, self.z_hop_speed)
                 toolhead.wait_moves()
 
-    def _run_hook(self, hook, params):
-        template = {
-            "xy_pre": self.template_pre_xy,
-            "xy_post": self.template_post_xy,
-        }.get(hook, None)
-        if template is None:
-            return
+    def _run_hook(self, template, params, raw_params):
         ctx = template.create_template_context()
         ctx["params"] = params
+        ctx["rawparams"] = raw_params
         template.run_gcode_from_command(ctx)
 
     def cmd_G28(self, gcmd):
@@ -2335,17 +2342,21 @@ class BeaconHomingHelper:
         if not (want_x or want_y or want_z):
             want_x = want_y = want_z = True
 
-        xy_home_params = {}
-        if want_x:
-            xy_home_params["X"] = "0"
-        if want_y:
-            xy_home_params["Y"] = "0"
-        if xy_home_params:
+        if want_x or want_y:
             orig_params = gcmd.get_command_parameters()
-            self._run_hook("xy_pre", orig_params)
-            cmd = self.gcode.create_gcode_command("G28", "G28", xy_home_params)
-            self.prev_gcmd(cmd)
-            self._run_hook("xy_post", orig_params)
+            raw_params = gcmd.get_raw_command_parameters()
+            self._run_hook(self.tmpl_pre_xy, orig_params, raw_params)
+            if want_x:
+                self._run_hook(self.tmpl_pre_x, orig_params, raw_params)
+                cmd = self.gcode.create_gcode_command("G28", "G28", {"X": "0"})
+                self.prev_gcmd(cmd)
+                self._run_hook(self.tmpl_post_x, orig_params, raw_params)
+            if want_y:
+                self._run_hook(self.tmpl_pre_y, orig_params, raw_params)
+                cmd = self.gcode.create_gcode_command("G28", "G28", {"Y": "0"})
+                self.prev_gcmd(cmd)
+                self._run_hook(self.tmpl_post_y, orig_params, raw_params)
+            self._run_hook(self.tmpl_post_xy, orig_params, raw_params)
 
         if want_z:
             curtime = self.beacon.reactor.monotonic()
@@ -2368,11 +2379,18 @@ class BeaconHomingHelper:
                     )
                     if method is None:
                         raise gcmd.error(
-                            "Invalid homing method, valid choices: proximity, contact"
+                            "Invalid homing method, valid choices: proximity, proximity_if_available, contact"
                         )
                     break
 
             pos = [self.home_pos[0], self.home_pos[1]]
+
+            if method == HOMING_AUTOCAL_METHOD_PROXIMITY_IF_AVAILABLE:
+                if self.beacon.model is not None:
+                    method = HOMING_AUTOCAL_METHOD_PROXIMITY
+                else:
+                    method = HOMING_AUTOCAL_METHOD_CONTACT
+
             if method == HOMING_AUTOCAL_METHOD_CONTACT:
                 toolhead.manual_move(pos, self.xy_move_speed)
 
@@ -2395,13 +2413,29 @@ class BeaconHomingHelper:
                     params["SKIP_MODEL_CREATION"] = "1"
                 cmd = self.gcode.create_gcode_command(cmd, cmd, params)
                 self.beacon.cmd_BEACON_AUTO_CALIBRATE(cmd)
-            else:
+            elif method == HOMING_AUTOCAL_METHOD_PROXIMITY:
                 pos[0] -= self.beacon.x_offset
                 pos[1] -= self.beacon.y_offset
                 toolhead.manual_move(pos, self.xy_move_speed)
                 cmd = self.gcode.create_gcode_command("G28", "G28", {"Z": "0"})
                 self.prev_gcmd(cmd)
+            else:
+                raise gcmd.error("Invalid homing method '%s'" % (method,))
             self._maybe_zhop(toolhead)
+
+
+class BeaconHomingState:
+    def get_axes(self):
+        return [2]
+
+    def get_trigger_position(self, stepper_name):
+        raise gcmd.error("get_trigger_position not supported")
+
+    def set_stepper_adjustment(self, stepper_name, adjustment):
+        pass
+
+    def set_homed_position(self, pos):
+        pass
 
 
 class BeaconMeshHelper:
