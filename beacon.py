@@ -31,6 +31,7 @@ from . import adxl345
 from .homing import HomingMove
 from mcu import MCU, MCU_trsync
 from clocksync import SecondarySync
+import msgproto
 
 STREAM_BUFFER_LIMIT_DEFAULT = 100
 STREAM_TIMEOUT = 1.0
@@ -266,81 +267,90 @@ class BeaconProbe:
                 pconfig.runtime_warning(result)
             except AttributeError:
                 logging.info(result)
+            return result
+        else:
+            return ""
 
     def _build_config(self):
-        self._check_mcu_version()
+        version_info = self._check_mcu_version()
 
-        self.beacon_stream_cmd = self._mcu.lookup_command(
-            "beacon_stream en=%u", cq=self.cmd_queue
-        )
-        self.beacon_set_threshold = self._mcu.lookup_command(
-            "beacon_set_threshold trigger=%u untrigger=%u", cq=self.cmd_queue
-        )
-        self.beacon_home_cmd = self._mcu.lookup_command(
-            "beacon_home trsync_oid=%c trigger_reason=%c trigger_invert=%c",
-            cq=self.cmd_queue,
-        )
-        self.beacon_stop_home_cmd = self._mcu.lookup_command(
-            "beacon_stop_home", cq=self.cmd_queue
-        )
-        self.beacon_nvm_read_cmd = self._mcu.lookup_query_command(
-            "beacon_nvm_read len=%c offset=%hu",
-            "beacon_nvm_data bytes=%*s offset=%hu",
-            cq=self.cmd_queue,
-        )
-        self.beacon_contact_home_cmd = self._mcu.lookup_command(
-            "beacon_contact_home trsync_oid=%c trigger_reason=%c trigger_type=%c",
-            cq=self.cmd_queue,
-        )
-        self.beacon_contact_query_cmd = self._mcu.lookup_query_command(
-            "beacon_contact_query",
-            "beacon_contact_state triggered=%c detect_clock=%u",
-            cq=self.cmd_queue,
-        )
-        self.beacon_contact_stop_home_cmd = self._mcu.lookup_command(
-            "beacon_contact_stop_home",
-            cq=self.cmd_queue,
-        )
-
-        constants = self._mcu.get_constants()
-
-        self._mcu_freq = self._mcu._mcu_freq
-
-        self.inv_adc_max = 1.0 / constants.get("ADC_MAX")
-        self.temp_smooth_count = constants.get("BEACON_ADC_SMOOTH_COUNT")
-        self.thermistor = thermistor.Thermistor(10000.0, 0.0)
-        self.thermistor.setup_coefficients_beta(25.0, 47000.0, 4101.0)
-
-        self.toolhead = self.printer.lookup_object("toolhead")
-        self.trapq = self.toolhead.get_trapq()
-
-        self.mcu_temp = BeaconMCUTempHelper.build_with_nvm(self)
-        self.model_temp = self.model_temp_builder.build_with_nvm(self)
-        if self.model_temp:
-            self.fmin = self.model_temp.fmin
-        if self.model is None:
-            self.model = self.models.get(self.default_model_name, None)
-        if self.model:
-            self._apply_threshold()
-
-        if self.beacon_stream_cmd is not None:
-            self.beacon_stream_cmd.send([1 if self._stream_en else 0])
-        if self._stream_en:
-            curtime = self.reactor.monotonic()
-            self.reactor.update_timer(
-                self._stream_timeout_timer, curtime + STREAM_TIMEOUT
+        try:
+            self.beacon_stream_cmd = self._mcu.lookup_command(
+                "beacon_stream en=%u", cq=self.cmd_queue
             )
-        else:
-            self.reactor.update_timer(self._stream_timeout_timer, self.reactor.NEVER)
+            self.beacon_set_threshold = self._mcu.lookup_command(
+                "beacon_set_threshold trigger=%u untrigger=%u", cq=self.cmd_queue
+            )
+            self.beacon_home_cmd = self._mcu.lookup_command(
+                "beacon_home trsync_oid=%c trigger_reason=%c trigger_invert=%c",
+                cq=self.cmd_queue,
+            )
+            self.beacon_stop_home_cmd = self._mcu.lookup_command(
+                "beacon_stop_home", cq=self.cmd_queue
+            )
+            self.beacon_nvm_read_cmd = self._mcu.lookup_query_command(
+                "beacon_nvm_read len=%c offset=%hu",
+                "beacon_nvm_data bytes=%*s offset=%hu",
+                cq=self.cmd_queue,
+            )
+            self.beacon_contact_home_cmd = self._mcu.lookup_command(
+                "beacon_contact_home trsync_oid=%c trigger_reason=%c trigger_type=%c",
+                cq=self.cmd_queue,
+            )
+            self.beacon_contact_query_cmd = self._mcu.lookup_query_command(
+                "beacon_contact_query",
+                "beacon_contact_state triggered=%c detect_clock=%u",
+                cq=self.cmd_queue,
+            )
+            self.beacon_contact_stop_home_cmd = self._mcu.lookup_command(
+                "beacon_contact_stop_home",
+                cq=self.cmd_queue,
+            )
 
-        if constants.get("BEACON_HAS_ACCEL", 0) == 1:
-            logging.info("Enabling Beacon accelerometer")
-            if self.accel_helper is None:
-                self.accel_helper = BeaconAccelHelper(
-                    self, self.accel_config, constants
+            constants = self._mcu.get_constants()
+
+            self._mcu_freq = self._mcu._mcu_freq
+
+            self.inv_adc_max = 1.0 / constants.get("ADC_MAX")
+            self.temp_smooth_count = constants.get("BEACON_ADC_SMOOTH_COUNT")
+            self.thermistor = thermistor.Thermistor(10000.0, 0.0)
+            self.thermistor.setup_coefficients_beta(25.0, 47000.0, 4101.0)
+
+            self.toolhead = self.printer.lookup_object("toolhead")
+            self.trapq = self.toolhead.get_trapq()
+
+            self.mcu_temp = BeaconMCUTempHelper.build_with_nvm(self)
+            self.model_temp = self.model_temp_builder.build_with_nvm(self)
+            if self.model_temp:
+                self.fmin = self.model_temp.fmin
+            if self.model is None:
+                self.model = self.models.get(self.default_model_name, None)
+            if self.model:
+                self._apply_threshold()
+
+            if self.beacon_stream_cmd is not None:
+                self.beacon_stream_cmd.send([1 if self._stream_en else 0])
+            if self._stream_en:
+                curtime = self.reactor.monotonic()
+                self.reactor.update_timer(
+                    self._stream_timeout_timer, curtime + STREAM_TIMEOUT
                 )
             else:
-                self.accel_helper.reinit(constants)
+                self.reactor.update_timer(self._stream_timeout_timer, self.reactor.NEVER)
+
+            if constants.get("BEACON_HAS_ACCEL", 0) == 1:
+                logging.info("Enabling Beacon accelerometer")
+                if self.accel_helper is None:
+                    self.accel_helper = BeaconAccelHelper(
+                        self, self.accel_config, constants
+                    )
+                else:
+                    self.accel_helper.reinit(constants)
+
+        except msgproto.error as e:
+            if version_info != "":
+                raise msgproto.error(version_info + "\n\n" + str(e))
+            raise
 
     def _extend_stats(self):
         parts = [
