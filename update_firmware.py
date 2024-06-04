@@ -36,7 +36,7 @@ def check_device_is_beacon(devpath):
     if manufacturer != "Beacon" and vendor != "04d8":
         return False
     product = read_dev_file(devpath, "product")
-    if not product.startswith("Beacon "):
+    if product is None or not product.startswith("Beacon "):
         return False
     rev = product[7:].lower()
     if not rev.startswith("rev"):

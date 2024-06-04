@@ -8,6 +8,9 @@ Beacon Klipper is the klipper module for using the [Beacon](https://beacon3d.com
 
 ## Firmware Release Notes
 
+### Beacon 2.0.1 - June 4, 2024
+ - Fixed USB enumeration issue affecting fast host controllers
+
 ### Beacon 2.0.0 - May 29, 2024
  - Beacon Contact Release
  - Adopted RTIC - The Hardware Accelerated Rust RTOS
