@@ -336,7 +336,9 @@ class BeaconProbe:
                     self._stream_timeout_timer, curtime + STREAM_TIMEOUT
                 )
             else:
-                self.reactor.update_timer(self._stream_timeout_timer, self.reactor.NEVER)
+                self.reactor.update_timer(
+                    self._stream_timeout_timer, self.reactor.NEVER
+                )
 
             if constants.get("BEACON_HAS_ACCEL", 0) == 1:
                 logging.info("Enabling Beacon accelerometer")

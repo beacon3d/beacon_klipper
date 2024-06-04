@@ -170,7 +170,7 @@ def task_check(device_path):
     if actual_fw_version != desired_fw_version:
         print(
             "Outdated Beacon firmware version %s, current version is %s.\n"
-            "Please run `install.sh` or `update_firmware.py all` to update to the latest version.\n"
+            "Please run `install.sh` or `update_firmware.py update all` to update to the latest version.\n"
             "Using an outdated firmware version can result in instability or failures."
             % (actual_fw_version, desired_fw_version)
         )
