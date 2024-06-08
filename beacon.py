@@ -2293,6 +2293,7 @@ class BeaconHomingHelper:
         self.z_hop = config.getfloat("home_z_hop", 0.0)
         self.z_hop_speed = config.getfloat("home_z_hop_speed", 15.0, above=0.0)
         self.xy_move_speed = config.getfloat("home_xy_move_speed", 50.0, above=0.0)
+        self.home_y_before_x = config.getboolean("home_y_before_x", False)
         self.method = config.getchoice(
             "home_method", HOMING_AUTOCAL_METHOD_CHOICES, "proximity"
         )
@@ -2358,16 +2359,21 @@ class BeaconHomingHelper:
             orig_params = gcmd.get_command_parameters()
             raw_params = gcmd.get_raw_command_parameters()
             self._run_hook(self.tmpl_pre_xy, orig_params, raw_params)
-            if want_x:
-                self._run_hook(self.tmpl_pre_x, orig_params, raw_params)
-                cmd = self.gcode.create_gcode_command("G28", "G28", {"X": "0"})
-                self.prev_gcmd(cmd)
-                self._run_hook(self.tmpl_post_x, orig_params, raw_params)
-            if want_y:
-                self._run_hook(self.tmpl_pre_y, orig_params, raw_params)
-                cmd = self.gcode.create_gcode_command("G28", "G28", {"Y": "0"})
-                self.prev_gcmd(cmd)
-                self._run_hook(self.tmpl_post_y, orig_params, raw_params)
+            if self.home_y_before_x:
+                axis_order = "yx"
+            else:
+                axis_order = "xy"
+            for axis in axis_order:
+                if axis == "x" and want_x:
+                    self._run_hook(self.tmpl_pre_x, orig_params, raw_params)
+                    cmd = self.gcode.create_gcode_command("G28", "G28", {"X": "0"})
+                    self.prev_gcmd(cmd)
+                    self._run_hook(self.tmpl_post_x, orig_params, raw_params)
+                elif axis == "y" and want_y:
+                    self._run_hook(self.tmpl_pre_y, orig_params, raw_params)
+                    cmd = self.gcode.create_gcode_command("G28", "G28", {"Y": "0"})
+                    self.prev_gcmd(cmd)
+                    self._run_hook(self.tmpl_post_y, orig_params, raw_params)
             self._run_hook(self.tmpl_post_xy, orig_params, raw_params)
 
         if want_z:
