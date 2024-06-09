@@ -57,6 +57,11 @@ class BeaconProbe:
         self.trigger_dive_threshold = config.getfloat("trigger_dive_threshold", 1.0)
         self.trigger_hysteresis = config.getfloat("trigger_hysteresis", 0.006)
         self.z_settling_time = config.getint("z_settling_time", 5, minval=0)
+        self.default_probe_method = config.getchoice(
+            "default_probe_method",
+            {"contact": "contact", "proximity": "proximity"},
+            "proximity",
+        )
 
         # If using paper for calibration, this would be .1mm
         self.cal_nozzle_z = config.getfloat("cal_nozzle_z", 0.1)
@@ -399,7 +404,7 @@ class BeaconProbe:
         return self.lift_speed
 
     def run_probe(self, gcmd):
-        method = gcmd.get("PROBE_METHOD", "proximity").lower()
+        method = gcmd.get("PROBE_METHOD", self.default_probe_method).lower()
         self._current_probe = method
         if method == "proximity":
             return self._run_probe_proximity(gcmd)
@@ -746,7 +751,9 @@ class BeaconProbe:
         orig = self.gcode.register_command(cmd, None)
 
         def cb(gcmd):
-            self._current_probe = gcmd.get("PROBE_METHOD", "proximity").lower()
+            self._current_probe = gcmd.get(
+                "PROBE_METHOD", self.default_probe_method
+            ).lower()
             return orig(gcmd)
 
         self.gcode.register_command(cmd, cb)
@@ -2447,7 +2454,7 @@ class BeaconHomingState:
         return [2]
 
     def get_trigger_position(self, stepper_name):
-        raise gcmd.error("get_trigger_position not supported")
+        raise Exception("get_trigger_position not supported")
 
     def set_stepper_adjustment(self, stepper_name, adjustment):
         pass
@@ -2578,7 +2585,9 @@ class BeaconMeshHelper:
 
     def cmd_BED_MESH_CALIBRATE(self, gcmd):
         method = gcmd.get("METHOD", "beacon").lower()
-        probe_method = gcmd.get("PROBE_METHOD", "proximity").lower()
+        probe_method = gcmd.get(
+            "PROBE_METHOD", self.beacon.default_probe_method
+        ).lower()
         if probe_method != "proximity":
             method = "automatic"
         if method == "beacon":
