@@ -1985,6 +1985,16 @@ class BeaconProbeWrapper:
     def run_probe(self, gcmd):
         return self.beacon.run_probe(gcmd)
 
+    def get_probe_params(self, gcmd=None):
+        return {"lift_speed": self.beacon.get_lift_speed(gcmd)}
+
+    def start_probe_session(self, gcmd):
+        self.multi_probe_begin()
+        return self
+
+    def end_probe_session(self):
+        self.multi_probe_end()
+
 
 class BeaconTempWrapper:
     def __init__(self, beacon):
