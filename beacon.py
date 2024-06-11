@@ -127,6 +127,7 @@ class BeaconProbe:
         )
         self.trapq = None
         self.mod_axis_twist_comp = None
+        self.get_z_compensation_value = lambda pos: 0.0
 
         mainsync = self.printer.lookup_object("mcu")._clocksync
         self._mcu = MCU(config, SecondarySync(self.reactor, mainsync))
@@ -230,6 +231,20 @@ class BeaconProbe:
         self.mod_axis_twist_comp = self.printer.lookup_object(
             "axis_twist_compensation", None
         )
+        if self.mod_axis_twist_comp:
+            if hasattr(self.mod_axis_twist_comp, "get_z_compensation_value"):
+                self.get_z_compensation_value = (
+                    lambda pos: self.mod_axis_twist_comp.get_z_compensation_value(pos)
+                )
+            else:
+
+                def _update_compensation(pos):
+                    cpos = list(pos)
+                    self.mod_axis_twist_comp._update_z_compensation_value(cpos)
+                    return cpos[2] - pos[2]
+
+                self.get_z_compensation_value = _update_compensation
+
         if self.model is None:
             self.model = self.models.get(self.default_model_name, None)
 
@@ -556,8 +571,7 @@ class BeaconProbe:
                 if "Timeout during probing move" in reason:
                     reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
-        if self.mod_axis_twist_comp:
-            epos[2] += self.mod_axis_twist_comp.get_z_compensation_value(pos)
+        epos[2] += self.get_z_compensation_value(pos)
         self.gcode.respond_info(
             "probe at %.3f,%.3f is z=%.6f" % (epos[0], epos[1], epos[2])
         )
@@ -871,8 +885,8 @@ class BeaconProbe:
             dist = self.freq_to_dist(freq, temp)
             pos, vel = self._get_trapq_position(time)
             if pos is not None:
-                if dist is not None and self.mod_axis_twist_comp:
-                    dist -= self.mod_axis_twist_comp.get_z_compensation_value(pos)
+                if dist is not None:
+                    dist -= self.get_z_compensation_value(pos)
             last = sample = {
                 "temp": temp,
                 "clock": clock,
