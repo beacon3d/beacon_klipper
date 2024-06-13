@@ -102,6 +102,7 @@ class BeaconProbe:
         self.last_probe_position = (0, 0)
         self.last_probe_result = None
         self.last_offset_result = None
+        self.last_poke_result = None
         self.last_contact_msg = None
         self.hardware_failure = None
 
@@ -1058,6 +1059,7 @@ class BeaconProbe:
             "last_probe_position": self.last_probe_position,
             "last_probe_result": self.last_probe_result,
             "last_offset_result": self.last_offset_result,
+            "last_poke_result": self.last_poke_result,
             "model": model,
         }
 
@@ -1365,6 +1367,14 @@ class BeaconProbe:
                         "Overshoot:    %.3f um" % ((epos[2] - spos[2]) * 1000.0,)
                     )
                     self.last_probe_result = "ok"
+                    self.last_poke_result = {
+                        "target_position": pos,
+                        "arming_z": armpos[2],
+                        "trigger_z": epos[2],
+                        "stopped_z": spos[2],
+                        "latency": self.last_contact_msg["latency"],
+                        "error": self.last_contact_msg["error"],
+                    }
                 except self.printer.command_error:
                     if self.printer.is_shutdown():
                         raise self.printer.command_error(
