@@ -1993,6 +1993,7 @@ class StopStreaming(Exception):
 class BeaconProbeWrapper:
     def __init__(self, beacon):
         self.beacon = beacon
+        self.results = None
 
     def multi_probe_begin(self):
         return self.beacon.multi_probe_begin()
@@ -2007,17 +2008,30 @@ class BeaconProbeWrapper:
         return self.beacon.get_lift_speed(gcmd)
 
     def run_probe(self, gcmd):
-        return self.beacon.run_probe(gcmd)
+        result = self.beacon.run_probe(gcmd)
+        if self.results is not None:
+            self.results.append(result)
+        return result
 
     def get_probe_params(self, gcmd=None):
         return {"lift_speed": self.beacon.get_lift_speed(gcmd)}
 
     def start_probe_session(self, gcmd):
         self.multi_probe_begin()
+        self.results = []
         return self
 
     def end_probe_session(self):
+        self.results = None
         self.multi_probe_end()
+
+    def pull_probed_results(self):
+        results = self.results
+        if results is None:
+            return []
+        else:
+            self.results = []
+            return results
 
 
 class BeaconTempWrapper:
