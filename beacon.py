@@ -2033,6 +2033,9 @@ class BeaconProbeWrapper:
             self.results = []
             return results
 
+    def get_status(self, eventtime):
+        return {"name": "beacon"}
+
 
 class BeaconTempWrapper:
     def __init__(self, beacon):
