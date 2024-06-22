@@ -2912,8 +2912,12 @@ class BeaconMeshHelper:
             self.max_y = bound_max_y
 
         # Update resolution to retain approximately the same step size as before
-        self.res_x = math.ceil(self.res_x * (self.max_x - self.min_x) / orig_span_x)
-        self.res_y = math.ceil(self.res_y * (self.max_y - self.min_y) / orig_span_y)
+        self.res_x = int(
+            math.ceil(self.res_x * (self.max_x - self.min_x) / orig_span_x)
+        )
+        self.res_y = int(
+            math.ceil(self.res_y * (self.max_y - self.min_y) / orig_span_y)
+        )
         # Guard against bicubic interpolation with 3 points on one axis
         min_res = 3
         if max(self.res_x, self.res_y) > 6 and min(self.res_x, self.res_y) < 4:
