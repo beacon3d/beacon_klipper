@@ -79,6 +79,9 @@ class BeaconProbe:
         self.autocal_tolerance = config.getfloat("autocal_tolerance", 0.008)
         self.autocal_max_retries = config.getfloat("autocal_max_retries", 3)
 
+        self.contact_latency_min = config.getint("contact_latency_min", 0)
+        self.contact_sensitivity = config.getint("contact_sensitivity", 0)
+
         # Load models
         self.model = None
         self.models = {}
@@ -155,6 +158,8 @@ class BeaconProbe:
         self.beacon_contact_home_cmd = None
         self.beacon_contact_query_cmd = None
         self.beacon_contact_stop_home_cmd = None
+        self.beacon_contact_set_latency_min_cmd = None
+        self.beacon_contact_set_sensitivity_cmd = None
 
         # Register z_virtual_endstop
         self.printer.lookup_object("pins").register_chip("probe", self)
@@ -326,6 +331,20 @@ class BeaconProbe:
                 "beacon_contact_stop_home",
                 cq=self.cmd_queue,
             )
+            try:
+                self.beacon_contact_set_latency_min_cmd = self._mcu.lookup_command(
+                    "beacon_contact_set_latency_min latency_min=%c",
+                    cq=self.cmd_queue,
+                )
+            except msgproto.error:
+                pass
+            try:
+                self.beacon_contact_set_sensitivity_cmd = self._mcu.lookup_command(
+                    "beacon_contact_set_sensitivity sensitivity=%c",
+                    cq=self.cmd_queue,
+                )
+            except msgproto.error:
+                pass
 
             constants = self._mcu.get_constants()
 
@@ -2255,6 +2274,14 @@ class BeaconContactEndstopWrapper:
         self.beacon._sample_async()
         self._shared.trsync_start(print_time)
         etrsync = self._shared._trsync
+        if self.beacon.beacon_contact_set_latency_min_cmd is not None:
+            self.beacon.beacon_contact_set_latency_min_cmd.send(
+                [self.beacon.contact_latency_min]
+            )
+        if self.beacon.beacon_contact_set_sensitivity_cmd is not None:
+            self.beacon.beacon_contact_set_sensitivity_cmd.send(
+                [self.beacon.contact_sensitivity]
+            )
         self.beacon.beacon_contact_home_cmd.send(
             [
                 etrsync.get_oid(),
