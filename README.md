@@ -8,6 +8,11 @@ Beacon Klipper is the klipper module for using the [Beacon](https://beacon3d.com
 
 ## Firmware Release Notes
 
+### Beacon 2.1.0 - July 11, 2024
+ - Added parameters to adjust contact noise tolerance
+ - Adjusted contact latency values to match new parameters
+ - Increased robustness of the primary contact trigger
+
 ### Beacon 2.0.1 - June 4, 2024
  - Fixed USB enumeration issue affecting fast host controllers
 
