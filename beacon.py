@@ -3435,12 +3435,14 @@ class BeaconAccelHelper(object):
 
     def _start_streaming(self):
         if self._stream_en == 0:
+            self._raw_samples = []
             self.accel_stream_cmd.send([1, self._scale["id"]])
         self._stream_en += 1
 
     def _stop_streaming(self):
         self._stream_en -= 1
         if self._stream_en == 0:
+            self._raw_samples = []
             self.accel_stream_cmd.send([0, 0])
 
     def _process_samples(self, raw_samples, last_sample):
