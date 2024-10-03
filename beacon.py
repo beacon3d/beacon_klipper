@@ -2138,7 +2138,8 @@ class BeaconEndstopShared:
         ffi_lib.trdispatch_stop(self._trdispatch)
         res = [trsync.stop() for trsync in self._trsyncs]
         if any([r == self._trsync.REASON_COMMS_TIMEOUT for r in res]):
-            return -1.0
+            cmderr = self.beacon.printer.command_error
+            raise cmderr("Communication timeout during homing")
         if res[0] != self._trsync.REASON_ENDSTOP_HIT:
             return 0.0
         return None
