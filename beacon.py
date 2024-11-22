@@ -2398,6 +2398,8 @@ class BeaconHomingHelper:
         self.tmpl_post_x = gcode_macro.load_template(config, "home_gcode_post_x", "")
         self.tmpl_pre_y = gcode_macro.load_template(config, "home_gcode_pre_y", "")
         self.tmpl_post_y = gcode_macro.load_template(config, "home_gcode_post_y", "")
+        self.tmpl_pre_z = gcode_macro.load_template(config, "home_gcode_pre_z", "")
+        self.tmpl_post_z = gcode_macro.load_template(config, "home_gcode_post_z", "")
 
         # Ensure homing is loaded so we can override G28
         beacon.printer.load_object(config, "homing")
@@ -2432,6 +2434,8 @@ class BeaconHomingHelper:
 
     def cmd_G28(self, gcmd):
         toolhead = self.beacon.printer.lookup_object("toolhead")
+        orig_params = gcmd.get_command_parameters()
+        raw_params = gcmd.get_raw_command_parameters()
 
         self._maybe_zhop(toolhead)
 
@@ -2441,8 +2445,6 @@ class BeaconHomingHelper:
             want_x = want_y = want_z = True
 
         if want_x or want_y:
-            orig_params = gcmd.get_command_parameters()
-            raw_params = gcmd.get_raw_command_parameters()
             self._run_hook(self.tmpl_pre_xy, orig_params, raw_params)
             if self.home_y_before_x:
                 axis_order = "yx"
@@ -2462,6 +2464,7 @@ class BeaconHomingHelper:
             self._run_hook(self.tmpl_post_xy, orig_params, raw_params)
 
         if want_z:
+            self._run_hook(self.tmpl_pre_z, orig_params, raw_params)
             curtime = self.beacon.reactor.monotonic()
             kin = toolhead.get_kinematics()
             kin_status = kin.get_status(curtime)
@@ -2525,6 +2528,7 @@ class BeaconHomingHelper:
             else:
                 raise gcmd.error("Invalid homing method '%s'" % (method,))
             self._maybe_zhop(toolhead)
+            self._run_hook(self.tmpl_post_z, orig_params, raw_params)
 
 
 class BeaconHomingState:
