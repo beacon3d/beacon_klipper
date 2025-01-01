@@ -2621,6 +2621,7 @@ class BeaconMeshHelper:
                 max(self.def_min_y - yo, self.def_min_y),
             )
 
+        def_contact_max = contact_def_max
         if contact_def_max is None:
             def_contact_max = (
                 min(self.def_max_x - xo, self.def_max_x),
