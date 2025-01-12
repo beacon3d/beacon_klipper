@@ -661,6 +661,8 @@ class BeaconProbe:
                 kin = self.toolhead.get_kinematics()
                 if hasattr(kin, "note_z_not_homed"):
                     kin.note_z_not_homed()
+                elif hasattr(kin, "clear_homing_state"):
+                    kin.clear_homing_state((2,))
             return
 
         gcmd.respond_info("Beacon calibration starting")
@@ -1523,6 +1525,8 @@ class BeaconProbe:
         except self.printer.command_error:
             if hasattr(kin, "note_z_not_homed"):
                 kin.note_z_not_homed()
+            elif hasattr(kin, "clear_homing_state"):
+                kin.clear_homing_state((2,))
             raise
         finally:
             self.mcu_contact_probe.deactivate_gcode.run_gcode_from_command()
@@ -2425,6 +2429,8 @@ class BeaconHomingHelper:
                 toolhead.wait_moves()
                 if hasattr(kin, "note_z_not_homed"):
                     kin.note_z_not_homed()
+                elif hasattr(kin, "clear_homing_state"):
+                    kin.clear_homing_state((2,))
             elif pos[2] < self.z_hop:
                 toolhead.manual_move(move, self.z_hop_speed)
                 toolhead.wait_moves()
