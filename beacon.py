@@ -647,7 +647,7 @@ class BeaconProbe:
                     - 2.0
                     - gcmd.get_float("CEIL", self.cal_ceil)
                 )
-                self.toolhead.set_position(pos, homing_axes=[2])
+                self.toolhead.set_position(pos, homing_axes="z")
                 forced_z = True
 
             def cb(kin_pos):
@@ -2420,7 +2420,7 @@ class BeaconHomingHelper:
             move = [None, None, self.z_hop]
             if "z" not in kin_status["homed_axes"]:
                 pos[2] = 0
-                toolhead.set_position(pos, homing_axes=[2])
+                toolhead.set_position(pos, homing_axes="z")
                 toolhead.manual_move(move, self.z_hop_speed)
                 toolhead.wait_moves()
                 if hasattr(kin, "note_z_not_homed"):
