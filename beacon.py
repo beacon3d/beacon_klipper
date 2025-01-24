@@ -39,12 +39,12 @@ API_DUMP_FIELDS = ["dist", "temp", "pos", "freq", "vel", "time"]
 
 
 class BeaconProbe:
-    def __init__(self, config):
-        self.printer = config.get_printer()
-        self.reactor = self.printer.get_reactor()
+    def __init__(self, config, sensor_id):
+        self.id = sensor_id
+        self.printer = printer = config.get_printer()
+        self.reactor = printer.get_reactor()
         self.name = config.get_name()
-
-        self.home_dir = os.path.dirname(os.path.realpath(__file__))
+        self.gcode = printer.lookup_object("gcode")
 
         self.speed = config.getfloat("speed", 5.0, above=0.0)
         self.lift_speed = config.getfloat("lift_speed", self.speed, above=0.0)
@@ -81,6 +81,10 @@ class BeaconProbe:
 
         self.contact_latency_min = config.getint("contact_latency_min", 0)
         self.contact_sensitivity = config.getint("contact_sensitivity", 0)
+
+        self.skip_firmware_version_check = config.getboolean(
+            "skip_firmware_version_check", False
+        )
 
         # Load models
         self.model = None
@@ -133,7 +137,7 @@ class BeaconProbe:
         self.mod_axis_twist_comp = None
         self.get_z_compensation_value = lambda pos: 0.0
 
-        mainsync = self.printer.lookup_object("mcu")._clocksync
+        mainsync = printer.lookup_object("mcu")._clocksync
         self._mcu = MCU(config, SecondarySync(self.reactor, mainsync))
         orig_stats = self._mcu.stats
 
@@ -143,7 +147,7 @@ class BeaconProbe:
             return show, value
 
         self._mcu.stats = beacon_mcu_stats
-        self.printer.add_object("mcu " + self.name, self._mcu)
+        printer.add_object("mcu " + self.name, self._mcu)
         self.cmd_queue = self._mcu.alloc_command_queue()
         self._endstop_shared = BeaconEndstopShared(self)
         self.mcu_probe = BeaconEndstopWrapper(self)
@@ -162,13 +166,15 @@ class BeaconProbe:
         self.beacon_contact_set_sensitivity_cmd = None
 
         # Register z_virtual_endstop
-        self.printer.lookup_object("pins").register_chip("probe", self)
+        register_as_probe = config.getboolean(
+            "register_as_probe", sensor_id.is_unnamed()
+        )
+        if register_as_probe:
+            printer.lookup_object("pins").register_chip("probe", self)
 
         # Register event handlers
-        self.printer.register_event_handler("klippy:connect", self._handle_connect)
-        self.printer.register_event_handler(
-            "klippy:shutdown", self.force_stop_streaming
-        )
+        printer.register_event_handler("klippy:connect", self._handle_connect)
+        printer.register_event_handler("klippy:shutdown", self.force_stop_streaming)
         self._mcu.register_config_callback(self._build_config)
         self._mcu.register_response(self._handle_beacon_data, "beacon_data")
         self._mcu.register_response(self._handle_beacon_status, "beacon_status")
@@ -176,59 +182,58 @@ class BeaconProbe:
 
         # Register webhooks
         self._api_dump = APIDumpHelper(
-            self.printer,
+            printer,
             lambda: self.streaming_session(self._api_dump_callback, latency=50),
             lambda stream: stream.stop(),
             None,
         )
-        self.webhooks = self.printer.lookup_object("webhooks")
-        self.webhooks.register_endpoint("beacon/status", self._handle_req_status)
-        self.webhooks.register_endpoint("beacon/dump", self._handle_req_dump)
+        sensor_id.register_endpoint("beacon/status", self._handle_req_status)
+        sensor_id.register_endpoint("beacon/dump", self._handle_req_dump)
 
         # Register gcode commands
-        self.gcode = self.printer.lookup_object("gcode")
-        self.gcode.register_command(
+        sensor_id.register_command(
             "BEACON_STREAM", self.cmd_BEACON_STREAM, desc=self.cmd_BEACON_STREAM_help
         )
-        self.gcode.register_command(
+        sensor_id.register_command(
             "BEACON_QUERY", self.cmd_BEACON_QUERY, desc=self.cmd_BEACON_QUERY_help
         )
-        self.gcode.register_command(
+        sensor_id.register_command(
             "BEACON_CALIBRATE",
             self.cmd_BEACON_CALIBRATE,
             desc=self.cmd_BEACON_CALIBRATE_help,
         )
-        self.gcode.register_command(
+        sensor_id.register_command(
             "BEACON_ESTIMATE_BACKLASH",
             self.cmd_BEACON_ESTIMATE_BACKLASH,
             desc=self.cmd_BEACON_ESTIMATE_BACKLASH_help,
         )
-        self.gcode.register_command("PROBE", self.cmd_PROBE, desc=self.cmd_PROBE_help)
-        self.gcode.register_command(
+        sensor_id.register_command("PROBE", self.cmd_PROBE, desc=self.cmd_PROBE_help)
+        sensor_id.register_command(
             "PROBE_ACCURACY", self.cmd_PROBE_ACCURACY, desc=self.cmd_PROBE_ACCURACY_help
         )
-        self.gcode.register_command(
+        sensor_id.register_command(
             "Z_OFFSET_APPLY_PROBE",
             self.cmd_Z_OFFSET_APPLY_PROBE,
             desc=self.cmd_Z_OFFSET_APPLY_PROBE_help,
         )
-        self.gcode.register_command(
+        sensor_id.register_command(
             "BEACON_POKE", self.cmd_BEACON_POKE, desc=self.cmd_BEACON_POKE_help
         )
-        self.gcode.register_command(
+        sensor_id.register_command(
             "BEACON_AUTO_CALIBRATE",
             self.cmd_BEACON_AUTO_CALIBRATE,
             desc=self.cmd_BEACON_AUTO_CALIBRATE_help,
         )
-        self.gcode.register_command(
+        sensor_id.register_command(
             "BEACON_OFFSET_COMPARE",
             self.cmd_BEACON_OFFSET_COMPARE,
             desc=self.cmd_BEACON_OFFSET_COMPARE_help,
         )
-        self._hook_probing_gcode(config, "z_tilt", "Z_TILT_ADJUST")
-        self._hook_probing_gcode(config, "quad_gantry_level", "QUAD_GANTRY_LEVEL")
-        self._hook_probing_gcode(config, "screws_tilt_adjust", "SCREWS_TILT_ADJUST")
-        self._hook_probing_gcode(config, "delta_calibrate", "DELTA_CALIBRATE")
+        if sensor_id.is_unnamed():
+            self._hook_probing_gcode(config, "z_tilt", "Z_TILT_ADJUST")
+            self._hook_probing_gcode(config, "quad_gantry_level", "QUAD_GANTRY_LEVEL")
+            self._hook_probing_gcode(config, "screws_tilt_adjust", "SCREWS_TILT_ADJUST")
+            self._hook_probing_gcode(config, "delta_calibrate", "DELTA_CALIBRATE")
 
     # Event handlers
 
@@ -255,7 +260,9 @@ class BeaconProbe:
             self.model = self.models.get(self.default_model_name, None)
 
     def _check_mcu_version(self):
-        updater = os.path.join(self.home_dir, "update_firmware.py")
+        if self.skip_firmware_version_check:
+            return ""
+        updater = os.path.join(self.id.tracker.home_dir(), "update_firmware.py")
         if not os.path.exists(updater):
             logging.info(
                 "Could not find Beacon firmware update script, won't check for update."
@@ -626,9 +633,7 @@ class BeaconProbe:
             curtime = self.printer.get_reactor().monotonic()
             kin_status = self.toolhead.get_status(curtime)
             if "xy" not in kin_status["homed_axes"]:
-                raise self.printer.command_error(
-                    "Must home X and Y " "before calibration"
-                )
+                raise self.printer.command_error("Must home X and Y before calibration")
 
             kin_pos = self.toolhead.get_position()
             if self._is_faulty_coordinate(kin_pos[0], kin_pos[1]):
@@ -647,7 +652,7 @@ class BeaconProbe:
                     - 2.0
                     - gcmd.get_float("CEIL", self.cal_ceil)
                 )
-                self.toolhead.set_position(pos, homing_axes=[2])
+                self.compat_toolhead_set_position_homing_z(self.toolhead, pos)
                 forced_z = True
 
             def cb(kin_pos):
@@ -659,8 +664,7 @@ class BeaconProbe:
         if kin_pos is None:
             if forced_z:
                 kin = self.toolhead.get_kinematics()
-                if hasattr(kin, "note_z_not_homed"):
-                    kin.note_z_not_homed()
+                self.compat_kin_note_z_not_homed(kin)
             return
 
         gcmd.respond_info("Beacon calibration starting")
@@ -752,7 +756,7 @@ class BeaconProbe:
     def _register_model(self, name, model):
         if name in self.models:
             raise self.printer.config_error(
-                "Multiple Beacon models with same" "name '%s'" % (name,)
+                "Multiple Beacon models with samename '%s'" % (name,)
             )
         self.models[name] = model
 
@@ -1099,6 +1103,26 @@ class BeaconProbe:
         self._api_dump.add_web_client(web_request)
         web_request.send({"header": API_DUMP_FIELDS})
 
+    # Compat wrappers
+
+    def compat_toolhead_set_position_homing_z(self, toolhead, pos):
+        func = toolhead.set_position
+        kind = tuple
+        if hasattr(func, "__defaults__"):  # Python 3
+            kind = type(func.__defaults__[0])
+        else:  # Python 2
+            kind = type(func.func_defaults[0])
+        if kind is str:
+            return toolhead.set_position(pos, homing_axes="z")
+        else:
+            return toolhead.set_position(pos, homing_axes=[2])
+
+    def compat_kin_note_z_not_homed(self, kin):
+        if hasattr(kin, "note_z_not_homed"):
+            kin.note_z_not_homed()
+        elif hasattr(kin, "clear_homing_state"):
+            kin.clear_homing_state("z")
+
     # GCode command handlers
 
     cmd_PROBE_help = "Probe Z-height at current XY position"
@@ -1302,7 +1326,7 @@ class BeaconProbe:
 
         if not self.model:
             raise self.gcode.error(
-                "You must calibrate your model first, " "use BEACON_CALIBRATE."
+                "You must calibrate your model first, use BEACON_CALIBRATE."
             )
 
         # We use the model code to save the new offset, but we can't actually
@@ -1448,7 +1472,7 @@ class BeaconProbe:
         self.printer.send_event("homing:home_rails_begin", homing_state, [])
         self.mcu_contact_probe.activate_gcode.run_gcode_from_command()
         try:
-            self.toolhead.set_position(force_pos, [2])
+            self.compat_toolhead_set_position_homing_z(self.toolhead, force_pos)
             skip_next = True
             retries = 0
             while len(stop_samples) < sample_count:
@@ -1521,8 +1545,7 @@ class BeaconProbe:
                 self._calibrate(gcmd, force_pos, force_pos[2], True, True)
 
         except self.printer.command_error:
-            if hasattr(kin, "note_z_not_homed"):
-                kin.note_z_not_homed()
+            self.compat_kin_note_z_not_homed(kin)
             raise
         finally:
             self.mcu_contact_probe.deactivate_gcode.run_gcode_from_command()
@@ -1609,7 +1632,8 @@ class BeaconModel:
 
     def save(self, beacon, show_message=True):
         configfile = beacon.printer.lookup_object("configfile")
-        section = "beacon model " + self.name
+        sensor_name = "" if beacon.id.is_unnamed() else "sensor %s " % (beacon.id.name)
+        section = "beacon " + sensor_name + "model " + self.name
         configfile.set(section, "model_coef", ",\n  ".join(map(str, self.poly.coef)))
         configfile.set(section, "model_domain", ",".join(map(str, self.poly.domain)))
         configfile.set(section, "model_range", "%f,%f" % (self.min_z, self.max_z))
@@ -1853,22 +1877,22 @@ class ModelManager:
     def __init__(self, beacon):
         self.beacon = beacon
         self.gcode = beacon.printer.lookup_object("gcode")
-        self.gcode.register_command(
+        beacon.id.register_command(
             "BEACON_MODEL_SELECT",
             self.cmd_BEACON_MODEL_SELECT,
             desc=self.cmd_BEACON_MODEL_SELECT_help,
         )
-        self.gcode.register_command(
+        beacon.id.register_command(
             "BEACON_MODEL_SAVE",
             self.cmd_BEACON_MODEL_SAVE,
             desc=self.cmd_BEACON_MODEL_SAVE_help,
         )
-        self.gcode.register_command(
+        beacon.id.register_command(
             "BEACON_MODEL_REMOVE",
             self.cmd_BEACON_MODEL_REMOVE,
             desc=self.cmd_BEACON_MODEL_REMOVE_help,
         )
-        self.gcode.register_command(
+        beacon.id.register_command(
             "BEACON_MODEL_LIST",
             self.cmd_BEACON_MODEL_LIST,
             desc=self.cmd_BEACON_MODEL_LIST_help,
@@ -2310,7 +2334,9 @@ class BeaconContactEndstopWrapper:
                 if ret["triggered"] == 0:
                     now = self.beacon.reactor.monotonic()
                     if now >= deadline:
-                        raise self.printer.command_error("Timeout getting contact time")
+                        raise self.beacon.printer.command_error(
+                            "Timeout getting contact time"
+                        )
                     self.beacon.reactor.pause(now + 0.001)
                     continue
                 time = self.beacon._clock32_to_time(ret["detect_clock"])
@@ -2406,9 +2432,9 @@ class BeaconHomingHelper:
 
         # Ensure homing is loaded so we can override G28
         beacon.printer.load_object(config, "homing")
-        self.gcode = beacon.printer.lookup_object("gcode")
-        self.prev_gcmd = self.gcode.register_command("G28", None)
-        self.gcode.register_command("G28", self.cmd_G28)
+        self.gcode = gcode = beacon.gcode
+        self.prev_gcmd = gcode.register_command("G28", None)
+        gcode.register_command("G28", self.cmd_G28)
 
     def _maybe_zhop(self, toolhead):
         if self.z_hop != 0:
@@ -2420,11 +2446,10 @@ class BeaconHomingHelper:
             move = [None, None, self.z_hop]
             if "z" not in kin_status["homed_axes"]:
                 pos[2] = 0
-                toolhead.set_position(pos, homing_axes=[2])
+                self.beacon.compat_toolhead_set_position_homing_z(toolhead, pos)
                 toolhead.manual_move(move, self.z_hop_speed)
                 toolhead.wait_moves()
-                if hasattr(kin, "note_z_not_homed"):
-                    kin.note_z_not_homed()
+                self.beacon.compat_kin_note_z_not_homed(kin)
             elif pos[2] < self.z_hop:
                 toolhead.manual_move(move, self.z_hop_speed)
                 toolhead.wait_moves()
@@ -2659,7 +2684,7 @@ class BeaconMeshHelper:
         self.exclude_object = None
         beacon.printer.register_event_handler("klippy:connect", self._handle_connect)
 
-        self.gcode = self.beacon.printer.lookup_object("gcode")
+        self.gcode = beacon.gcode
         self.prev_gcmd = self.gcode.register_command("BED_MESH_CALIBRATE", None)
         self.gcode.register_command(
             "BED_MESH_CALIBRATE",
@@ -3326,18 +3351,23 @@ Accel_Measurement = collections.namedtuple(
 
 
 class BeaconAccelDummyConfig(object):
-    def __init__(self, printer, accel_config):
-        self.printer = printer
+    def __init__(self, beacon, accel_config):
+        self.beacon = beacon
         self.accel_config = accel_config
 
     def get_name(self):
-        return "beacon"
+        if self.beacon.id.is_unnamed():
+            return "beacon"
+        else:
+            return "beacon_" + self.beacon.id.name
 
     def has_section(self, name):
+        if not self.beacon.id.is_unnamed():
+            return True
         return name == "adxl345" and self.accel_config.adxl345_exists
 
     def get_printer(self):
-        return self.printer
+        return self.beacon.printer
 
 
 class BeaconAccelConfig(object):
@@ -3356,9 +3386,7 @@ class BeaconAccelConfig(object):
         for a in axes_map:
             a = a.strip()
             if a not in axes:
-                raise config.error(
-                    "Invalid accel_axes_map, unknown axes " "'%s'" % (a,)
-                )
+                raise config.error("Invalid accel_axes_map, unknown axes '%s'" % (a,))
             self.axes_map.append(axes[a])
 
         self.adxl345_exists = config.has_section("adxl345")
@@ -3375,8 +3403,8 @@ class BeaconAccelHelper(object):
             lambda _: self._stop_streaming(),
             self._api_update,
         )
-        beacon.webhooks.register_endpoint("beacon/dump_accel", self._handle_req_dump)
-        adxl345.AccelCommandHelper(BeaconAccelDummyConfig(beacon.printer, config), self)
+        beacon.id.register_endpoint("beacon/dump_accel", self._handle_req_dump)
+        adxl345.AccelCommandHelper(BeaconAccelDummyConfig(beacon, config), self)
 
         self._stream_en = 0
         self._raw_samples = []
@@ -3417,7 +3445,7 @@ class BeaconAccelHelper(object):
                 scale_val = float(scale_val_str)
             except Exception:
                 logging.error(
-                    "Beacon accelerometer scale %s could not be " "processed", name
+                    "Beacon accelerometer scale %s could not be processed", name
                 )
                 scale_val = 1  # Values will be weird, but scale will work
 
@@ -3427,14 +3455,12 @@ class BeaconAccelHelper(object):
 
         if not self.default_scale_name:
             if first_scale_name is None:
-                logging.error(
-                    "Could not determine default Beacon " "accelerometer scale"
-                )
+                logging.error("Could not determine default Beacon accelerometer scale")
             else:
                 self.default_scale_name = first_scale_name
         elif self.default_scale_name not in scales:
             logging.error(
-                "Default Beacon accelerometer scale '%s' not found, " " using '%s'",
+                "Default Beacon accelerometer scale '%s' not found,  using '%s'",
                 self.default_scale_name,
                 first_scale_name,
             )
@@ -3556,10 +3582,10 @@ class BeaconAccelHelper(object):
         return cli
 
     def read_reg(self, reg):
-        raise self.printer.command_error("Not supported")
+        raise self.beacon.printer.command_error("Not supported")
 
     def set_reg(self, reg, val, minclock=0):
-        raise self.printer.command_error("Not supported")
+        raise self.beacon.printer.command_error("Not supported")
 
     def is_measuring(self):
         return self._stream_en > 0
@@ -3695,23 +3721,149 @@ class APIDumpHelper:
         return cconn
 
 
+class BeaconTracker:
+    def __init__(self, config, printer):
+        self.config = config
+        self.printer = printer
+        self.sensors = {}
+        self.gcodes = {}
+        self.endpoints = {}
+        self.gcode = printer.lookup_object("gcode")
+        self.webhooks = printer.lookup_object("webhooks")
+
+    def get_status(self, eventtime):
+        return {"sensors": list(self.sensors.keys())}
+
+    def home_dir(self):
+        return os.path.dirname(os.path.realpath(__file__))
+
+    def add_sensor(self, name):
+        if name is None:
+            cfg = self.config.getsection("beacon")
+        else:
+            if not name.islower():
+                raise self.config.error(
+                    "Beacon sensor name must be all lower case, sensor name '%s' is not valid"
+                    % (name,)
+                )
+            cfg = self.config.getsection("beacon sensor " + name)
+        self.sensors[name] = sensor = BeaconProbe(cfg, BeaconId(name, self))
+        if name is None:
+            self.printer.add_object("probe", BeaconProbeWrapper(sensor))
+        coil_name = "beacon_coil" if name is None else "beacon_%s_coil" % (name,)
+        temp = BeaconTempWrapper(sensor)
+        self.printer.add_object("temperature_sensor " + coil_name, temp)
+        pheaters = self.printer.load_object(self.config, "heaters")
+        pheaters.available_sensors.append("temperature_sensor " + coil_name)
+        return sensor
+
+    def get_or_add_sensor(self, name):
+        if name in self.sensors:
+            return self.sensors[name]
+        else:
+            return self.add_sensor(name)
+
+    def register_gcode_command(self, sensor, cmd, func, desc):
+        if cmd not in self.gcodes:
+            handlers = self.gcodes[cmd] = {}
+            self.gcode.register_command(
+                cmd, lambda gcmd: self.dispatch_gcode(handlers, gcmd), desc=desc
+            )
+        self.gcodes[cmd][sensor] = func
+
+    def dispatch_gcode(self, handlers, gcmd):
+        sensor = gcmd.get("SENSOR", "")
+        if sensor == "":
+            sensor = None
+        handler = handlers.get(sensor, None)
+        if not handler:
+            if sensor is None:
+                raise gcmd.error(
+                    "No default Beacon registered, provide SENSOR= option to select specific sensor."
+                )
+            else:
+                raise gcmd.error(
+                    "Requested sensor '%s' not found, specify a valid sensor."
+                    % (sensor,)
+                )
+        handler(gcmd)
+
+    def register_endpoint(self, sensor, path, callback):
+        if path not in self.endpoints:
+            self.webhooks.register_endpoint(path, self.dispatch_webhook)
+            self.endpoints[path] = {}
+        self.endpoints[path][sensor] = callback
+
+    def dispatch_webhook(self, req):
+        handlers = self.endpoints[req.method]
+        sensor = req.get("sensor", "")
+        if sensor == "":
+            sensor = None
+        handler = handlers.get(sensor, None)
+        if not handler:
+            if sensor is None:
+                raise req.error(
+                    "No default Beacon registered, provide 'sensor' option to specify sensor."
+                )
+            else:
+                raise req.error(
+                    "Requested sensor '%s' not found, specify a valid or no sensor to use default"
+                    % (sensor,)
+                )
+        handler(req)
+
+
+class BeaconId:
+    def __init__(self, name, tracker):
+        self.name = name
+        self.tracker = tracker
+
+    def is_unnamed(self):
+        return self.name is None
+
+    def register_command(self, cmd, func, desc):
+        self.tracker.register_gcode_command(self.name, cmd, func, desc)
+
+    def register_endpoint(self, path, callback):
+        self.tracker.register_endpoint(self.name, path, callback)
+
+
+def get_beacons(config):
+    printer = config.get_printer()
+    beacons = printer.lookup_object("beacons", None)
+    if beacons is None:
+        beacons = BeaconTracker(config, printer)
+        printer.add_object("beacons", beacons)
+    return beacons
+
+
 def load_config(config):
-    beacon = BeaconProbe(config)
-    config.get_printer().add_object("probe", BeaconProbeWrapper(beacon))
-    temp = BeaconTempWrapper(beacon)
-    config.get_printer().add_object("temperature_sensor beacon_coil", temp)
-    pheaters = beacon.printer.load_object(config, "heaters")
-    pheaters.available_sensors.append("temperature_sensor beacon_coil")
-    return beacon
+    return get_beacons(config).get_or_add_sensor(None)
 
 
 def load_config_prefix(config):
-    beacon = config.get_printer().lookup_object("beacon")
-    name = config.get_name()
-    if name.startswith("beacon model "):
-        name = name[13:]
+    beacons = get_beacons(config)
+    sensor = None
+    secname = config.get_name()
+    parts = secname[7:].split()
+
+    if len(parts) != 0 and parts[0] == "sensor":
+        if len(parts) < 2:
+            raise config.error("Missing Beacon sensor name")
+        sensor = parts[1]
+        parts = parts[2:]
+
+    beacon = beacons.get_or_add_sensor(sensor)
+
+    if len(parts) == 0:
+        return beacon
+
+    if parts[0] == "model":
+        if len(parts) != 2:
+            raise config.error("Missing Beacon model name in section '%s'" % (secname,))
+        name = parts[1]
         model = BeaconModel.load(name, config, beacon)
         beacon._register_model(name, model)
         return model
     else:
-        raise config.error("Unknown beacon config directive '%s'" % (name[7:],))
+        raise config.error("Unknown beacon config directive '%s'" % (secname,))
