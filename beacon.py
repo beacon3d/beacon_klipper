@@ -2087,7 +2087,7 @@ class BeaconTempWrapper:
         }
 
 
-TRSYNC_TIMEOUT = 0.025
+TRSYNC_TIMEOUT = 0.05
 
 
 class BeaconEndstopShared:
