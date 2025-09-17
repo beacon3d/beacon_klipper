@@ -35,7 +35,7 @@ import msgproto
 
 STREAM_BUFFER_LIMIT_DEFAULT = 100
 STREAM_TIMEOUT = 1.0
-API_DUMP_FIELDS = ["dist", "temp", "pos", "freq", "vel", "time"]
+API_DUMP_FIELDS = ["dist", "temp", "pos", "freq", "time"]
 
 
 class BeaconProbe:
@@ -363,6 +363,7 @@ class BeaconProbe:
             self.thermistor.setup_coefficients_beta(25.0, 47000.0, 4101.0)
 
             self.toolhead = self.printer.lookup_object("toolhead")
+            self.kinematics = self.toolhead.get_kinematics()
             self.trapq = self.toolhead.get_trapq()
 
             self.mcu_temp = BeaconMCUTempHelper.build_with_nvm(self)
@@ -486,12 +487,11 @@ class BeaconProbe:
 
     def _probing_move_to_probing_height(self, speed):
         curtime = self.reactor.monotonic()
-        status = self.toolhead.get_kinematics().get_status(curtime)
+        status = self.kinematics.get_status(curtime)
         pos = self.toolhead.get_position()
         pos[2] = status["axis_minimum"][2]
         try:
             self.phoming.probing_move(self.mcu_probe, pos, speed)
-            self._sample_printtime_sync(self.z_settling_time)
         except self.printer.command_error as e:
             reason = str(e)
             if "Timeout during probing move" in reason:
@@ -617,7 +617,7 @@ class BeaconProbe:
         allow_faulty = gcmd.get_int("ALLOW_FAULTY_COORDINATE", 0) != 0
         nozzle_z = gcmd.get_float("NOZZLE_Z", self.cal_nozzle_z)
         if gcmd.get("SKIP_MANUAL_PROBE", None) is not None:
-            kin = self.toolhead.get_kinematics()
+            kin = self.kinematics
             kin_spos = {
                 s.get_name(): s.get_commanded_position() for s in kin.get_steppers()
             }
@@ -663,7 +663,7 @@ class BeaconProbe:
     def _calibrate(self, gcmd, kin_pos, cal_nozzle_z, forced_z, is_auto=False):
         if kin_pos is None:
             if forced_z:
-                kin = self.toolhead.get_kinematics()
+                kin = self.kinematics
                 self.compat_kin_note_z_not_homed(kin)
             return
 
@@ -906,7 +906,7 @@ class BeaconProbe:
             data_smooth = self._data_filter.value()
             freq = self.count_to_freq(data_smooth)
             dist = self.freq_to_dist(freq, temp)
-            pos, vel = self._get_trapq_position(time)
+            pos = self._get_position_at_time(time)
             if pos is not None:
                 if dist is not None:
                     dist -= self.get_z_compensation_value(pos)
@@ -921,7 +921,6 @@ class BeaconProbe:
             }
             if pos is not None:
                 sample["pos"] = pos
-                sample["vel"] = vel
             self._check_hardware(sample)
 
             if len(self._stream_callbacks) > 0:
@@ -995,22 +994,15 @@ class BeaconProbe:
         self._stream_buffer_count += len(samples)
         self._stream_flush_schedule()
 
-    def _get_trapq_position(self, print_time):
-        ffi_main, ffi_lib = chelper.get_ffi()
-        data = ffi_main.new("struct pull_move[1]")
-        count = ffi_lib.trapq_extract_old(self.trapq, data, 1, 0.0, print_time)
-        if not count:
-            return None, None
-        move = data[0]
-        move_time = max(0.0, min(move.move_t, print_time - move.print_time))
-        dist = (move.start_v + 0.5 * move.accel * move_time) * move_time
-        pos = (
-            move.start_x + move.x_r * dist,
-            move.start_y + move.y_r * dist,
-            move.start_z + move.z_r * dist,
-        )
-        velocity = move.start_v + move.accel * move_time
-        return pos, velocity
+    def _get_position_at_time(self, print_time):
+        kin = self.kinematics
+        pos = {
+            s.get_name(): s.mcu_to_commanded_position(
+                s.get_past_mcu_position(print_time)
+            )
+            for s in kin.get_steppers()
+        }
+        return kin.calc_position(pos)
 
     def _sample_printtime_sync(self, skip=0, count=1):
         move_time = self.toolhead.get_last_move_time()
@@ -1239,11 +1231,11 @@ class BeaconProbe:
                 f.close()
 
             completion_cb = close_file
-            f.write("time,data,data_smooth,freq,dist,temp,pos_x,pos_y,pos_z,vel\n")
+            f.write("time,data,data_smooth,freq,dist,temp,pos_x,pos_y,pos_z\n")
 
             def cb(sample):
                 pos = sample.get("pos", None)
-                obj = "%.4f,%d,%.2f,%.5f,%.5f,%.2f,%s,%s,%s,%s\n" % (
+                obj = "%.4f,%d,%.2f,%.5f,%.5f,%.2f,%s,%s,%s\n" % (
                     sample["time"],
                     sample["data"],
                     sample["data_smooth"],
@@ -1253,7 +1245,6 @@ class BeaconProbe:
                     "%.3f" % (pos[0],) if pos is not None else "",
                     "%.3f" % (pos[1],) if pos is not None else "",
                     "%.3f" % (pos[2],) if pos is not None else "",
-                    "%.3f" % (sample["vel"],) if "vel" in sample else "",
                 )
                 f.write(obj)
 
@@ -1366,11 +1357,11 @@ class BeaconProbe:
         ts = time.strftime("%Y%m%d_%H%M%S")
         fn = "/tmp/poke_%s_%.3f_%.3f-%.3f.csv" % (ts, speed, top, bottom)
         with open(fn, "w") as f:
-            f.write("time,data,data_smooth,freq,dist,temp,pos_x,pos_y,pos_z,vel\n")
+            f.write("time,data,data_smooth,freq,dist,temp,pos_x,pos_y,pos_z\n")
 
             def cb(sample):
                 pos = sample.get("pos", None)
-                obj = "%.6f,%d,%.2f,%.5f,%.5f,%.2f,%s,%s,%s,%s\n" % (
+                obj = "%.6f,%d,%.2f,%.5f,%.5f,%.2f,%s,%s,%s\n" % (
                     sample["time"],
                     sample["data"],
                     sample["data_smooth"],
@@ -1380,7 +1371,6 @@ class BeaconProbe:
                     "%.3f" % (pos[0],) if pos is not None else "",
                     "%.3f" % (pos[1],) if pos is not None else "",
                     "%.5f" % (pos[2],) if pos is not None else "",
-                    "%.3f" % (sample["vel"],) if "vel" in sample else "",
                 )
                 f.write(obj)
 
@@ -1397,7 +1387,7 @@ class BeaconProbe:
                     epos = hmove.homing_move(pos, speed, probe_pos=True)[:3]
                     self.toolhead.wait_moves()
                     spos = self.toolhead.get_position()[:3]
-                    armpos, _armvel = self._get_trapq_position(
+                    armpos = self._get_position_at_time(
                         self._clock32_to_time(self.last_contact_msg["armed_clock"])
                     )
                     gcmd.respond_info("Armed at:     z=%.5f" % (armpos[2],))
@@ -1448,7 +1438,7 @@ class BeaconProbe:
         )
 
         curtime = self.reactor.monotonic()
-        kin = self.toolhead.get_kinematics()
+        kin = self.kinematics
         kin_status = kin.get_status(curtime)
         if "x" not in kin_status["homed_axes"] or "y" not in kin_status["homed_axes"]:
             raise gcmd.error("Must home X and Y axes first")
