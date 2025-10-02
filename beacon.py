@@ -268,7 +268,7 @@ class BeaconProbe:
                 "Could not find Beacon firmware update script, won't check for update."
             )
             return ""
-        serialport = self._mcu._serialport
+        serialport = self.compat_serial_port(self._mcu)
 
         parent_conn, child_conn = multiprocessing.Pipe()
 
@@ -355,7 +355,7 @@ class BeaconProbe:
 
             constants = self._mcu.get_constants()
 
-            self._mcu_freq = self._mcu._mcu_freq
+            self._mcu_freq = self._mcu.get_constant_float("CLOCK_FREQ")
 
             self.inv_adc_max = 1.0 / constants.get("ADC_MAX")
             self.temp_smooth_count = constants.get("BEACON_ADC_SMOOTH_COUNT")
@@ -1114,6 +1114,14 @@ class BeaconProbe:
             kin.note_z_not_homed()
         elif hasattr(kin, "clear_homing_state"):
             kin.clear_homing_state("z")
+
+    def compat_serial_port(self, mcu):
+        if hasattr(mcu, "_serialport"):
+            return mcu._serialport
+        elif hasattr(mcu, "_conn_helper"):
+            return mcu._conn_helper.get_serialport()[0]
+        else:
+            raise Exception("Could not determine serial port")
 
     # GCode command handlers
 
