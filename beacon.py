@@ -1002,7 +1002,7 @@ class BeaconProbe:
             )
             for s in kin.get_steppers()
         }
-        return kin.calc_position(pos)
+        return kin.calc_position(pos)[:3]
 
     def _sample_printtime_sync(self, skip=0, count=1):
         move_time = self.toolhead.get_last_move_time()
