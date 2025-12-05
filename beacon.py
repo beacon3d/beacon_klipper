@@ -235,6 +235,9 @@ class BeaconProbe:
             self._hook_probing_gcode(config, "screws_tilt_adjust", "SCREWS_TILT_ADJUST")
             self._hook_probing_gcode(config, "delta_calibrate", "DELTA_CALIBRATE")
 
+        # Qidi Klipper compatibility
+        self.vibrate = 0
+
     # Event handlers
 
     def _handle_connect(self):
