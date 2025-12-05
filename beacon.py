@@ -241,6 +241,9 @@ class BeaconProbe:
             self._hook_probing_gcode(config, "screws_tilt_adjust", "SCREWS_TILT_ADJUST")
             self._hook_probing_gcode(config, "delta_calibrate", "DELTA_CALIBRATE")
 
+        # Qidi Klipper compatibility
+        self.vibrate = 0
+
     # Event handlers
 
     def _handle_connect(self):
@@ -253,6 +256,15 @@ class BeaconProbe:
                 self.get_z_compensation_value = (
                     lambda pos: self.mod_axis_twist_comp.get_z_compensation_value(pos)
                 )
+            elif hasattr(manual_probe, "ProbeResult"):
+
+                def _update_compensation(pos):
+                    cpos = [self.compat_create_probe_result(pos)]
+                    bed_z = cpos[0].bed_z
+                    self.mod_axis_twist_comp._update_z_compensation_value(cpos)
+                    return cpos[0].bed_z - bed_z
+
+                self.get_z_compensation_value = _update_compensation
             else:
 
                 def _update_compensation(pos):
@@ -440,7 +452,7 @@ class BeaconProbe:
     def multi_probe_end(self):
         self._stop_streaming()
 
-    def get_offsets(self):
+    def get_offsets(self, _gcmd=None):
         if self._current_probe == "contact":
             return 0, 0, 0
         else:
@@ -1129,6 +1141,18 @@ class BeaconProbe:
         else:
             raise Exception("Could not determine serial port")
 
+    probe_result_builder = None
+
+    def compat_create_probe_result(self, test_pos):
+        if BeaconProbe.probe_result_builder is None:
+            if hasattr(manual_probe, "ProbeResult"):
+
+                BeaconProbe.probe_result_builder = prb_proberesult
+            else:
+
+                BeaconProbe.probe_result_builder = prb_identity
+        return BeaconProbe.probe_result_builder(self, test_pos)
+
     # GCode command handlers
 
     cmd_PROBE_help = "Probe Z-height at current XY position"
@@ -1613,6 +1637,19 @@ class BeaconProbe:
             "delta": delta,
         }
 
+def prb_proberesult(beacon, test_pos):
+    (x, y, z) = beacon.get_offsets()
+    return manual_probe.ProbeResult(
+        test_pos[0] + x,
+        test_pos[1] + y,
+        test_pos[2] - z,
+        test_pos[0],
+        test_pos[1],
+        test_pos[2],
+    )
+
+def prb_identity(beacon, test_pos):
+    return test_pos
 
 class BeaconModel:
     @classmethod
@@ -2050,7 +2087,7 @@ class BeaconProbeWrapper:
     def multi_probe_end(self):
         return self.beacon.multi_probe_end()
 
-    def get_offsets(self):
+    def get_offsets(self, _gcmd=None):
         return self.beacon.get_offsets()
 
     def get_lift_speed(self, gcmd=None):
@@ -2058,6 +2095,7 @@ class BeaconProbeWrapper:
 
     def run_probe(self, gcmd, *args, **kwargs):
         result = self.beacon.run_probe(gcmd)
+        result = self.beacon.compat_create_probe_result(result)
         if self.results is not None:
             self.results.append(result)
         return result
@@ -3033,7 +3071,7 @@ class BeaconMeshHelper:
         def cb(sample):
             total_samples[0] += 1
             d = sample["dist"]
-            (x, y, z) = sample["pos"]
+            (x, y, z) = sample["pos"][:3]
             x += xo
             y += yo
 
