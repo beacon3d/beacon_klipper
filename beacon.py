@@ -2056,7 +2056,7 @@ class BeaconProbeWrapper:
     def get_lift_speed(self, gcmd=None):
         return self.beacon.get_lift_speed(gcmd)
 
-    def run_probe(self, gcmd):
+    def run_probe(self, gcmd, *args, **kwargs):
         result = self.beacon.run_probe(gcmd)
         if self.results is not None:
             self.results.append(result)
