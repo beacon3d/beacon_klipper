@@ -253,8 +253,8 @@ class BeaconProbe:
         )
         if self.mod_axis_twist_comp:
             if hasattr(self.mod_axis_twist_comp, "get_z_compensation_value"):
-                self.get_z_compensation_value = (
-                    lambda pos: self.mod_axis_twist_comp.get_z_compensation_value(pos)
+                self.get_z_compensation_value = lambda pos: (
+                    self.mod_axis_twist_comp.get_z_compensation_value(pos)
                 )
             elif hasattr(manual_probe, "ProbeResult"):
 
@@ -1146,10 +1146,8 @@ class BeaconProbe:
     def compat_create_probe_result(self, test_pos):
         if BeaconProbe.probe_result_builder is None:
             if hasattr(manual_probe, "ProbeResult"):
-
                 BeaconProbe.probe_result_builder = prb_proberesult
             else:
-
                 BeaconProbe.probe_result_builder = prb_identity
         return BeaconProbe.probe_result_builder(self, test_pos)
 
@@ -1637,6 +1635,7 @@ class BeaconProbe:
             "delta": delta,
         }
 
+
 def prb_proberesult(beacon, test_pos):
     (x, y, z) = beacon.get_offsets()
     return manual_probe.ProbeResult(
@@ -1648,8 +1647,10 @@ def prb_proberesult(beacon, test_pos):
         test_pos[2],
     )
 
+
 def prb_identity(beacon, test_pos):
     return test_pos
+
 
 class BeaconModel:
     @classmethod
