@@ -222,9 +222,15 @@ class BeaconProbe:
             self.cmd_BEACON_ESTIMATE_BACKLASH,
             desc=self.cmd_BEACON_ESTIMATE_BACKLASH_help,
         )
-        sensor_id.register_command("PROBE", self.cmd_PROBE, desc=self.cmd_PROBE_help)
+        prefixed_probe_commands = config.getboolean("prefixed_probe_commands", False)
+        probe_cmd_prefix = "BEACON_" if prefixed_probe_commands else ""
         sensor_id.register_command(
-            "PROBE_ACCURACY", self.cmd_PROBE_ACCURACY, desc=self.cmd_PROBE_ACCURACY_help
+            probe_cmd_prefix + "PROBE", self.cmd_PROBE, desc=self.cmd_PROBE_help
+        )
+        sensor_id.register_command(
+            probe_cmd_prefix + "PROBE_ACCURACY",
+            self.cmd_PROBE_ACCURACY,
+            desc=self.cmd_PROBE_ACCURACY_help,
         )
         sensor_id.register_command(
             "Z_OFFSET_APPLY_PROBE",
