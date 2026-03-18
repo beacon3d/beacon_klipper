@@ -233,7 +233,7 @@ class BeaconProbe:
             desc=self.cmd_PROBE_ACCURACY_help,
         )
         sensor_id.register_command(
-            "Z_OFFSET_APPLY_PROBE",
+            probe_cmd_prefix + "Z_OFFSET_APPLY_PROBE",
             self.cmd_Z_OFFSET_APPLY_PROBE,
             desc=self.cmd_Z_OFFSET_APPLY_PROBE_help,
         )
