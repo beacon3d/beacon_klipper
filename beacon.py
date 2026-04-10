@@ -31,6 +31,7 @@ from . import adxl345
 from .homing import HomingMove
 from mcu import MCU, MCU_trsync
 from clocksync import SecondarySync
+import configfile
 import msgproto
 
 STREAM_BUFFER_LIMIT_DEFAULT = 100
@@ -3414,6 +3415,8 @@ Accel_Measurement = collections.namedtuple(
 
 
 class BeaconAccelDummyConfig(object):
+    error = configfile.error
+
     def __init__(self, beacon, accel_config):
         self.beacon = beacon
         self.accel_config = accel_config
