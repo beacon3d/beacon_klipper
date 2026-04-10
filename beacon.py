@@ -123,7 +123,7 @@ class BeaconProbe:
         self.mesh_helper = BeaconMeshHelper.create(self, config)
         self.homing_helper = BeaconHomingHelper.create(self, config)
         self.accel_helper = None
-        self.accel_config = BeaconAccelConfig(config)
+        self.accel_config = BeaconAccelConfig(config, sensor_id)
 
         self._stream_en = 0
         self._stream_timeout_timer = self.reactor.register_timer(self._stream_timeout)
@@ -3422,22 +3422,16 @@ class BeaconAccelDummyConfig(object):
         self.accel_config = accel_config
 
     def get_name(self):
-        if self.beacon.id.is_unnamed():
-            return "beacon"
-        else:
-            return "beacon_" + self.beacon.id.name
-
-    def has_section(self, name):
-        if not self.beacon.id.is_unnamed():
-            return True
-        return name == "adxl345" and self.accel_config.adxl345_exists
+        return "beacon_accel " + (
+            self.accel_config.accel_name or self.accel_config.default_name
+        )
 
     def get_printer(self):
         return self.beacon.printer
 
 
 class BeaconAccelConfig(object):
-    def __init__(self, config):
+    def __init__(self, config, sensor_id):
         self.default_scale = config.get("accel_scale", "")
         axes = {
             "x": (0, 1),
@@ -3455,7 +3449,12 @@ class BeaconAccelConfig(object):
                 raise config.error("Invalid accel_axes_map, unknown axes '%s'" % (a,))
             self.axes_map.append(axes[a])
 
-        self.adxl345_exists = config.has_section("adxl345")
+        self.default_name = (
+            "beacon" if sensor_id.is_unnamed() else "beacon_" + sensor_id.name
+        )
+        self.accel_name = config.get(
+            "accel_name", None if sensor_id.is_unnamed() else self.default_name
+        )
 
 
 class BeaconAccelHelper(object):
@@ -3470,7 +3469,14 @@ class BeaconAccelHelper(object):
             self._api_update,
         )
         beacon.id.register_endpoint("beacon/dump_accel", self._handle_req_dump)
-        adxl345.AccelCommandHelper(BeaconAccelDummyConfig(beacon, config), self)
+        cmd_helper = adxl345.AccelCommandHelper(
+            BeaconAccelDummyConfig(beacon, config), self
+        )
+        if config.accel_name is None:
+            try:
+                cmd_helper.register_commands(None)
+            except beacon.printer.config_error:
+                pass
 
         self._stream_en = 0
         self._raw_samples = []
