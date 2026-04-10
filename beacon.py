@@ -323,7 +323,7 @@ class BeaconProbe:
         eventtime = self.reactor.monotonic()
         while child.is_alive():
             eventtime = self.reactor.pause(eventtime + 0.1)
-        (is_err, result) = parent_conn.recv()
+        is_err, result = parent_conn.recv()
         child.join()
         parent_conn.close()
         if is_err:
@@ -442,7 +442,7 @@ class BeaconProbe:
             "refs=%d" % (self._stream_en,),
         ]
         if self.last_mcu_temp is not None:
-            (mcu_temp, supply_voltage) = self.last_mcu_temp
+            mcu_temp, supply_voltage = self.last_mcu_temp
             parts.append("mcu_temp=%.2f" % (mcu_temp,))
             parts.append("supply_voltage=%.3f" % (supply_voltage,))
 
@@ -536,7 +536,7 @@ class BeaconProbe:
     def _probe(self, speed, num_samples=10, allow_faulty=False):
         target = self.trigger_distance
         tdt = self.trigger_dive_threshold
-        (dist, samples) = self._sample(5, num_samples)
+        dist, samples = self._sample(5, num_samples)
 
         x, y = samples[0]["pos"][0:2]
         if self._is_faulty_coordinate(x, y, True):
@@ -550,7 +550,7 @@ class BeaconProbe:
             # If we are above the dive threshold right now, we'll need to
             # do probing move and then re-measure
             self._probing_move_to_probing_height(speed)
-            (dist, samples) = self._sample(self.z_settling_time, num_samples)
+            dist, samples = self._sample(self.z_settling_time, num_samples)
         elif math.isinf(dist) and dist < 0:
             # We were below the valid range of the model
             msg = "Attempted to probe with Beacon below calibrated model range"
@@ -559,7 +559,7 @@ class BeaconProbe:
             # We are below the probing target height, we'll move to the
             # correct height and take a new sample.
             self._move_to_probing_height(speed)
-            (dist, samples) = self._sample(self.z_settling_time, num_samples)
+            dist, samples = self._sample(self.z_settling_time, num_samples)
 
         pos = samples[0]["pos"]
 
@@ -921,7 +921,7 @@ class BeaconProbe:
     def _stream_flush_message(self, msg):
         last = None
         for sample in msg:
-            (clock, data) = sample
+            clock, data = sample
             temp = self.last_temp
             if self.model_temp is not None and not (-40 < temp < 180):
                 msg = (
@@ -1217,7 +1217,7 @@ class BeaconProbe:
         try:
             self._start_streaming()
 
-            (cur_dist, _samples) = self._sample(wait, 10)
+            cur_dist, _samples = self._sample(wait, 10)
             pos = self.toolhead.get_position()
             missing = target - cur_dist
             target = pos[2] + missing
@@ -1232,7 +1232,7 @@ class BeaconProbe:
                 liftpos = [None, None, target]
                 self.toolhead.manual_move(liftpos, lift_speed)
                 self.toolhead.wait_moves()
-                (dist, _samples) = self._sample(wait, 10)
+                dist, _samples = self._sample(wait, 10)
                 {-1: samples_up, 1: samples_down}[next_dir].append(dist)
                 next_dir = next_dir * -1
 
@@ -1641,7 +1641,7 @@ class BeaconProbe:
         self.toolhead.manual_move([None, None, 2.0], 100.0)
 
         # Query
-        (dist, _samples) = self._sample(self.z_settling_time, 10)
+        dist, _samples = self._sample(self.z_settling_time, 10)
         dist = 2.0 - dist
 
         # Back
@@ -1661,7 +1661,7 @@ class BeaconProbe:
 
 
 def prb_proberesult(beacon, test_pos):
-    (x, y, z) = beacon.get_offsets()
+    x, y, z = beacon.get_offsets()
     return manual_probe.ProbeResult(
         test_pos[0] + x,
         test_pos[1] + y,
@@ -1784,12 +1784,12 @@ class BeaconMCUTempHelper:
     def build_with_nvm(cls, beacon):
         nvm_data = beacon.beacon_nvm_read_cmd.send([8, 65534])
         if nvm_data["offset"] == 65534:
-            (lower, upper) = struct.unpack("<II", nvm_data["bytes"])
+            lower, upper = struct.unpack("<II", nvm_data["bytes"])
             temp_room = (lower & 0xFF) + 0.1 * ((lower >> 8) & 0xF)
             temp_hot = ((lower >> 12) & 0xFF) + 0.1 * ((lower >> 20) & 0xF)
             adc_room = (upper >> 8) & 0xFFF
             adc_hot = (upper >> 20) & 0xFFF
-            (ref_room_raw, ref_hot_raw) = struct.unpack("<xxxbbxxx", nvm_data["bytes"])
+            ref_room_raw, ref_hot_raw = struct.unpack("<xxxbbxxx", nvm_data["bytes"])
             ref_room = 1.0 - ref_room_raw / 1000.0
             ref_hot = 1.0 - ref_hot_raw / 1000.0
             return cls(temp_room, temp_hot, ref_room, ref_hot, adc_room, adc_hot)
@@ -1838,7 +1838,7 @@ class BeaconTempModelV0:
 
     @classmethod
     def build_with_nvm(cls, beacon, parameters, nvm_data):
-        (f_count, adc_count) = struct.unpack("<IH", nvm_data["bytes"][:6])
+        f_count, adc_count = struct.unpack("<IH", nvm_data["bytes"][:6])
         if f_count < 0xFFFFFFFF and adc_count < 0xFFFF:
             if parameters["fmin"] is None:
                 parameters["fmin"] = beacon.count_to_freq(f_count)
@@ -1889,7 +1889,7 @@ class BeaconTempModelV1:
 
     @classmethod
     def build_with_nvm(cls, beacon, parameters, nvm_data):
-        (fnorm, temp, ver, cal) = struct.unpack("<dfBxxxf", nvm_data["bytes"])
+        fnorm, temp, ver, cal = struct.unpack("<dfBxxxf", nvm_data["bytes"])
         amfg = cls._amfg(cal)
         logging.info(
             "beacon: loaded fnorm=%.2f temp=%.2f amfg=%.3f from nvm", fnorm, temp, amfg
@@ -2266,7 +2266,7 @@ class BeaconEndstopWrapper:
 
         # After homing Z we perform a measurement and adjust the toolhead
         # kinematic position.
-        (dist, samples) = self.beacon._sample(self.beacon.z_settling_time, 10)
+        dist, samples = self.beacon._sample(self.beacon.z_settling_time, 10)
         if math.isinf(dist):
             logging.error("Post-homing adjustment measured samples %s", samples)
             raise self.beacon.printer.command_error(
@@ -2899,7 +2899,7 @@ class BeaconMeshHelper:
 
         if swap_coord:
             for i in range(len(points)):
-                (x, y) = points[i]
+                x, y = points[i]
                 points[i] = (y, x)
 
         return points
@@ -2983,7 +2983,7 @@ class BeaconMeshHelper:
             self.beacon._start_streaming()
 
             # Move to first location
-            (x, y) = path[0]
+            x, y = path[0]
             self.toolhead.manual_move([x, y, None], speed)
             self.toolhead.wait_moves()
 
@@ -3062,9 +3062,9 @@ class BeaconMeshHelper:
 
     def _collect_zero_ref(self, speed, coord):
         xo, yo = self.beacon.x_offset, self.beacon.y_offset
-        (x, y) = coord
+        x, y = coord
         self.toolhead.manual_move([x - xo, y - yo, None], speed)
-        (dist, _samples) = self.beacon._sample(50, 10)
+        dist, _samples = self.beacon._sample(50, 10)
         self.zero_ref_val = dist
 
     def _is_valid_position(self, x, y):
@@ -3096,7 +3096,7 @@ class BeaconMeshHelper:
         def cb(sample):
             total_samples[0] += 1
             d = sample["dist"]
-            (x, y, z) = sample["pos"][:3]
+            x, y, z = sample["pos"][:3]
             x += xo
             y += yo
 
@@ -3197,7 +3197,7 @@ class BeaconMeshHelper:
         mask = self._generate_fault_mask()
         matrix, faulty_regions = self._generate_matrix(raw_clusters, mask)
         if len(faulty_regions) > 0:
-            (error, interpolator_or_msg) = self._load_interpolator()
+            error, interpolator_or_msg = self._load_interpolator()
             if error:
                 return (True, interpolator_or_msg)
             matrix = self._interpolate_faulty(
@@ -3631,7 +3631,7 @@ class BeaconAccelHelper(object):
         with self._sample_lock:
             raw_samples = self._raw_samples
             self._raw_samples = []
-        (samples, errors, last_raw_sample) = self._process_samples(
+        samples, errors, last_raw_sample = self._process_samples(
             raw_samples, self._last_raw_sample
         )
         if len(samples) == 0:
