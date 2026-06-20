@@ -254,6 +254,9 @@ class BeaconProbe:
         )
         if sensor_id.is_unnamed():
             self._hook_probing_gcode(config, "z_tilt", "Z_TILT_ADJUST")
+            self._hook_probing_gcode(config, "z_tilt_ng", "Z_TILT_ADJUST")
+            self._hook_probing_gcode(config, "z_tilt_ng", "Z_TILT_CALIBRATE")
+            self._hook_probing_gcode(config, "z_tilt_ng", "Z_TILT_AUTODETECT")
             self._hook_probing_gcode(config, "quad_gantry_level", "QUAD_GANTRY_LEVEL")
             self._hook_probing_gcode(config, "screws_tilt_adjust", "SCREWS_TILT_ADJUST")
             self._hook_probing_gcode(config, "delta_calibrate", "DELTA_CALIBRATE")
