@@ -154,7 +154,7 @@ def find_beacons():
 def task_check(device_path):
     sys_devpath = serial_sys_devpath(device_path)
     if sys_devpath is None:
-        print("Could not look up syspath for device")
+        print("Could not find sys entry for device")
         sys.exit(255)
 
     rev = check_device_is_beacon(sys_devpath)
@@ -183,29 +183,62 @@ def task_update(device_path, no_sudo, force):
     else:
         sys_devpath = serial_sys_devpath(device_path)
         if sys_devpath is None:
-            print("Could not find sys entry for given device")
+            print("Could not find sys entry for device")
             sys.exit(255)
 
         rev = check_device_is_beacon(sys_devpath)
         if rev == False:
-            print("Given device does not appear to be a Beacon")
+            print("Device does not appear to be a Beacon")
             sys.exit(255)
         do_update(device_path, sys_devpath, rev, no_sudo, force)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Beacon firmware updater")
-    subparsers = parser.add_subparsers(dest="command")
-    subparsers.required = True
+    parser = argparse.ArgumentParser(
+        description=(
+            "Beacon firmware updater\n\n"
+            "Examples:\n"
+            "  update_firmware.py check /dev/serial/by-id/...\n"
+            "  update_firmware.py update /dev/serial/by-id/...\n\n"
+            "Notes:\n"
+            "  - 'check' produces no output if firmware is up-to-date\n"
+            "  - 'update' uses 'sudo' unless --no-sudo is specified\n"
+            "  - Use --force to flash even if the firmware appears current"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
 
-    parser_check = subparsers.add_parser("check")
-    parser_check.add_argument("device_path")
+    subparsers = parser.add_subparsers(dest="cmd")
 
-    parser_update = subparsers.add_parser("update")
-    parser_update.add_argument("device_path")
-    parser_update.add_argument("--no-sudo", default=False, action="store_true")
-    parser_update.add_argument("--force", default=False, action="store_true")
+    check_parser = subparsers.add_parser("check", help="Check if firmware is up to date")
+    check_parser.add_argument("device_path", help="Path to serial device (e.g. /dev/serial/by-id/...)")
 
-    kwargs = vars(parser.parse_args())
-    sub = kwargs.pop("command")
-    globals()["task_" + sub](**kwargs)
+    update_parser = subparsers.add_parser("update", help="Update firmware")
+    update_parser.add_argument("device_path", help="Path to serial device (e.g. /dev/serial/by-id/...)")
+
+    update_parser.add_argument(
+        "--no-sudo",
+        action="store_true",
+        help="Do not use 'sudo' when flashing"
+    )
+    update_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force firmware flash even if up-to-date"
+    )
+
+    args = parser.parse_args()
+    if args.cmd is None:
+        parser.print_help()
+        sys.exit(1)
+
+    dispatch = {
+        "check": task_check,
+        "update": task_update
+    }
+
+    kwargs = vars(args)
+    cmd = kwargs.pop("cmd")
+
+    dispatch[cmd](**kwargs)
