@@ -13,6 +13,7 @@ import importlib
 import traceback
 import logging
 import chelper
+import inspect
 import pins
 import math
 import time
@@ -22,6 +23,7 @@ import numpy as np
 import copy
 import collections
 import itertools
+from functools import partial
 from numpy.polynomial import Polynomial
 from . import manual_probe
 from . import probe
@@ -133,6 +135,7 @@ class BeaconProbe:
         self._stream_buffer_count = 0
         self._stream_buffer_limit = STREAM_BUFFER_LIMIT_DEFAULT
         self._stream_buffer_limit_new = self._stream_buffer_limit
+        self._stream_sample_rate = None
         self._stream_samples_queue = queue.Queue()
         self._stream_flush_event = threading.Event()
         self._log_stream = None
@@ -142,7 +145,7 @@ class BeaconProbe:
         )
         self.trapq = None
         self.mod_axis_twist_comp = None
-        self.get_z_compensation_value = lambda pos: 0.0
+        self.get_z_compensation_value = lambda pos, probe: 0.0
 
         mainsync = printer.lookup_object("mcu")._clocksync
         self._mcu = MCU(config, SecondarySync(self.reactor, mainsync))
@@ -176,9 +179,7 @@ class BeaconProbe:
         register_as_probe = config.getboolean(
             "register_as_probe", sensor_id.is_unnamed()
         )
-        if register_as_probe:
-            printer.lookup_object("pins").register_chip("probe", self)
-            self.printer.add_object("probe", BeaconProbeWrapper(self))
+        self._register_probe(config, sensor_id, register_as_probe)
 
         # Register event handlers
         printer.register_event_handler("klippy:connect", self._handle_connect)
@@ -273,12 +274,22 @@ class BeaconProbe:
         )
         if self.mod_axis_twist_comp:
             if hasattr(self.mod_axis_twist_comp, "get_z_compensation_value"):
-                self.get_z_compensation_value = lambda pos: (
-                    self.mod_axis_twist_comp.get_z_compensation_value(pos)
-                )
+                try:
+                    # Kalico per-probe axis_twist_compensation
+                    inspect.signature(
+                        self.mod_axis_twist_comp.get_z_compensation_value
+                    ).bind([], self)
+                    self.get_z_compensation_value = lambda pos, probe: (
+                        self.mod_axis_twist_comp.get_z_compensation_value(pos, probe)
+                    )
+                except (TypeError, ValueError):
+                    self.get_z_compensation_value = lambda pos, probe: (
+                        self.mod_axis_twist_comp.get_z_compensation_value(pos)
+                    )
+
             elif hasattr(manual_probe, "ProbeResult"):
 
-                def _update_compensation(pos):
+                def _update_compensation(pos, probe):
                     cpos = [self.compat_create_probe_result(pos)]
                     bed_z = cpos[0].bed_z
                     self.mod_axis_twist_comp._update_z_compensation_value(cpos)
@@ -287,7 +298,7 @@ class BeaconProbe:
                 self.get_z_compensation_value = _update_compensation
             else:
 
-                def _update_compensation(pos):
+                def _update_compensation(pos, probe):
                     cpos = list(pos)
                     self.mod_axis_twist_comp._update_z_compensation_value(cpos)
                     return cpos[2] - pos[2]
@@ -464,6 +475,89 @@ class BeaconProbe:
             raise pins.error("Can not pullup/invert probe virtual endstop")
         return self.mcu_probe
 
+    def _register_probe(self, config, sensor_id, register_as_probe):
+        if not hasattr(probe, "ProbeList"):
+            self.registered_probe_proximity = None
+            self.registered_probe_contact = None
+            if register_as_probe:
+                self.printer.lookup_object("pins").register_chip("probe", self)
+                self.printer.add_object("probe", BeaconProbeWrapper(self))
+            return
+
+        class BeaconPrinterProbe(probe.PrinterProbe):
+            def __init__(self, cfg, mcu_probe, beacon, method):
+                self.beacon = beacon
+                self.method = method
+                super().__init__(cfg, mcu_probe)
+
+            def run_probe(self, gcmd, *args, **kwargs):
+                if self.method == "contact" and self.mcu_probe.per_point_hooks:
+                    self.beacon._start_streaming()
+                    try:
+                        result = self.beacon._run_probe_contact(gcmd)
+                    finally:
+                        self.beacon._stop_streaming()
+                else:
+                    result = super().run_probe(gcmd, *args, **kwargs)
+                return result
+
+            def cmd_PROBE_CALIBRATE(self, gcmd):
+                raise gcmd.error("Use BEACON_CALIBRATE to calibrate Beacon")
+
+            def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
+                if self.method == "contact":
+                    raise gcmd.error("Beacon contact probe offset is fixed at zero")
+                self.beacon.cmd_Z_OFFSET_APPLY_PROBE(gcmd)
+
+            def setup_pin(self, pin_type, pin_params):
+                # When invoked as `probe:z_virtual_endstop` we want to preserve proximity behavior
+                if pin_params["chip_name"] == "probe":
+                    return probe.PrinterProbe.setup_pin(
+                        self.beacon.registered_probe_proximity, pin_type, pin_params
+                    )
+                return super().setup_pin(pin_type, pin_params)
+
+        basename = "beacon"
+        if not sensor_id.is_unnamed():
+            basename += "_" + sensor_id.name
+
+        def register(method, mcu_probe, values):
+            name = basename + "_" + method
+            values["register_as_probe"] = register_as_probe and (
+                method == self.default_probe_method
+            )
+            cfg = BeaconProbeConfig(config, "probe " + name, values)
+            return BeaconPrinterProbe(cfg, mcu_probe, self, method)
+
+        self.registered_probe_proximity = register(
+            "proximity",
+            BeaconProximityMCUProbe(self),
+            {
+                "speed": self.speed,
+                "lift_speed": self.lift_speed,
+                "x_offset": self.x_offset,
+                "y_offset": self.y_offset,
+                "z_offset": self.trigger_distance,
+                "samples": 1,
+            },
+        )
+        self.registered_probe_contact = register(
+            "contact",
+            BeaconContactMCUProbe(self),
+            {
+                "speed": self.autocal_speed,
+                "lift_speed": self.lift_speed,
+                "x_offset": 0.0,
+                "y_offset": 0.0,
+                "z_offset": 0.0,
+                "samples": int(self.autocal_sample_count),
+                "sample_retract_dist": self.autocal_retract_dist,
+                "samples_result": "average",
+                "samples_tolerance": self.autocal_tolerance,
+                "samples_tolerance_retries": int(self.autocal_max_retries),
+            },
+        )
+
     # Probe interface
 
     def multi_probe_begin(self):
@@ -519,27 +613,29 @@ class BeaconProbe:
 
         self._start_streaming()
         try:
-            return self._probe(speed, allow_faulty=allow_faulty)
+            return self._probe(speed, gcmd, allow_faulty=allow_faulty)
         finally:
             self._stop_streaming()
 
-    def _probing_move_to_probing_height(self, speed):
+    def _probing_move_to_probing_height(self, speed, gcmd):
         curtime = self.reactor.monotonic()
         status = self.kinematics.get_status(curtime)
         pos = self.toolhead.get_position()
         pos[2] = status["axis_minimum"][2]
         try:
-            self.phoming.probing_move(self.mcu_probe, pos, speed)
+            self.compat_probing_move(pos, speed, gcmd)
         except self.printer.command_error as e:
             reason = str(e)
             if "Timeout during probing move" in reason:
                 reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
 
-    def _probe(self, speed, num_samples=10, allow_faulty=False):
+    def _probe(
+        self, speed, gcmd, num_samples=10, allow_faulty=False, uncompensated=False
+    ):
         target = self.trigger_distance
         tdt = self.trigger_dive_threshold
-        dist, samples = self._sample(5, num_samples)
+        dist, samples = self._sample(5, num_samples, uncompensated=uncompensated)
 
         x, y = samples[0]["pos"][0:2]
         if self._is_faulty_coordinate(x, y, True):
@@ -552,8 +648,12 @@ class BeaconProbe:
         if dist > target + tdt:
             # If we are above the dive threshold right now, we'll need to
             # do probing move and then re-measure
-            self._probing_move_to_probing_height(speed)
-            dist, samples = self._sample(self.z_settling_time, num_samples)
+            self._probing_move_to_probing_height(speed, gcmd)
+            dist, samples = self._sample(
+                self.z_settling_time,
+                num_samples,
+                uncompensated=uncompensated,
+            )
         elif math.isinf(dist) and dist < 0:
             # We were below the valid range of the model
             msg = "Attempted to probe with Beacon below calibrated model range"
@@ -562,7 +662,11 @@ class BeaconProbe:
             # We are below the probing target height, we'll move to the
             # correct height and take a new sample.
             self._move_to_probing_height(speed)
-            dist, samples = self._sample(self.z_settling_time, num_samples)
+            dist, samples = self._sample(
+                self.z_settling_time,
+                num_samples,
+                uncompensated=uncompensated,
+            )
 
         pos = samples[0]["pos"]
 
@@ -595,10 +699,10 @@ class BeaconProbe:
 
         posxy = self.toolhead.get_position()[:2]
 
-        self.mcu_contact_probe.activate_gcode.run_gcode_from_command()
+        self.compat_template_run_gcode(self.mcu_contact_probe.activate_gcode, gcmd)
         try:
             while len(samples) < sample_count:
-                pos = self._probe_contact(speed)
+                pos = self._probe_contact(speed, gcmd)
                 self.toolhead.manual_move(posxy + [pos[2] + retract_dist], lift_speed)
                 if drop_n > 0:
                     drop_n -= 1
@@ -616,13 +720,17 @@ class BeaconProbe:
             else:
                 return posxy + [float(np.mean(samples))]
         finally:
-            self.mcu_contact_probe.deactivate_gcode.run_gcode_from_command()
+            self.compat_template_run_gcode(
+                self.mcu_contact_probe.deactivate_gcode, gcmd
+            )
 
-    def _probe_contact(self, speed):
+    def _probe_contact(self, speed, gcmd, uncompensated=False):
         self.toolhead.get_last_move_time()
         self._sample_async()
         start_pos = self.toolhead.get_position()
-        hmove = HomingMove(self.printer, [(self.mcu_contact_probe, "contact")])
+        hmove = self.compat_homing_move(
+            self.printer, [(self.mcu_contact_probe, "contact")], gcmd
+        )
         pos = start_pos[:]
         pos[2] = -2
         try:
@@ -635,7 +743,8 @@ class BeaconProbe:
                 if "Timeout during probing move" in reason:
                     reason += probe.HINT_TIMEOUT
             raise self.printer.command_error(reason)
-        epos[2] += self.get_z_compensation_value(pos)
+        if not uncompensated:
+            epos[2] += self.get_z_compensation_value(pos, self.registered_probe_contact)
         self.gcode.respond_info(
             "probe at %.3f,%.3f is z=%.6f" % (epos[0], epos[1], epos[2])
         )
@@ -829,6 +938,27 @@ class BeaconProbe:
             self._current_probe = gcmd.get(
                 "PROBE_METHOD", self.default_probe_method
             ).lower()
+            params = gcmd.get_command_parameters()
+            if (
+                hasattr(probe, "ProbeList")
+                and "PROBE" not in params
+                and "PROBE_METHOD" in params
+            ):
+                selected = {
+                    "proximity": self.registered_probe_proximity,
+                    "contact": self.registered_probe_contact,
+                }.get(self._current_probe)
+                if selected is None:
+                    raise gcmd.error(
+                        "Invalid PROBE_METHOD, valid choices: proximity, contact"
+                    )
+                params = dict(params, PROBE=selected.probe_name)
+                gcmd = self.compat_create_gcode_command(
+                    gcmd,
+                    gcmd.get_command(),
+                    gcmd.get_commandline() + " PROBE=" + selected.probe_name,
+                    params,
+                )
             return orig(gcmd)
 
         self.gcode.register_command(cmd, cb)
@@ -944,10 +1074,13 @@ class BeaconProbe:
             data_smooth = self._data_filter.value()
             freq = self.count_to_freq(data_smooth)
             dist = self.freq_to_dist(freq, temp)
+            dist_raw = dist
             pos = self._get_position_at_time(time)
             if pos is not None:
                 if dist is not None:
-                    dist -= self.get_z_compensation_value(pos)
+                    dist -= self.get_z_compensation_value(
+                        pos, self.registered_probe_proximity
+                    )
             last = sample = {
                 "temp": temp,
                 "clock": clock,
@@ -956,6 +1089,7 @@ class BeaconProbe:
                 "data_smooth": data_smooth,
                 "freq": freq,
                 "dist": dist,
+                "dist_raw": dist_raw,
             }
             if pos is not None:
                 sample["pos"] = pos
@@ -969,6 +1103,9 @@ class BeaconProbe:
             dist = last["dist"]
             if dist is None or np.isinf(dist) or np.isnan(dist):
                 del last["dist"]
+            dist_raw = last["dist_raw"]
+            if dist_raw is None or np.isinf(dist_raw) or np.isnan(dist_raw):
+                del last["dist_raw"]
             self.last_received_sample = last
 
     def _stream_flush(self):
@@ -1014,6 +1151,8 @@ class BeaconProbe:
         delta_clock = (
             params["delta_clock"] / (sample_count - 1) if sample_count > 1 else 0
         )
+        if delta_clock:
+            self._stream_sample_rate = self._mcu_freq / delta_clock
 
         samples = []
         data = 0
@@ -1064,9 +1203,10 @@ class BeaconProbe:
         else:
             return samples
 
-    def _sample(self, skip, count):
+    def _sample(self, skip, count, uncompensated=False):
         samples = self._sample_printtime_sync(skip, count)
-        return (median([s["dist"] for s in samples]), samples)
+        field = "dist_raw" if uncompensated else "dist"
+        return (median([s[field] for s in samples]), samples)
 
     def _sample_async(self, count=1):
         samples = []
@@ -1177,6 +1317,30 @@ class BeaconProbe:
         else:
             name = msg.split()[0]
             return self._mcu.register_response(cb, name, oid)
+
+    def compat_homing_move(self, printer, endstops, gcmd):
+        try:
+            return HomingMove(printer, endstops, self.toolhead, gcmd)
+        except TypeError:
+            return HomingMove(printer, endstops, self.toolhead)
+
+    def compat_probing_move(self, pos, speed, gcmd):
+        try:
+            self.phoming.probing_move(self.mcu_probe, pos, speed, gcmd)
+        except TypeError:
+            self.phoming.probing_move(self.mcu_probe, pos, speed)
+
+    def compat_template_run_gcode(self, template, gcmd, ctx=None):
+        if hasattr(template, "run_gcode"):
+            template.run_gcode(gcmd, ctx)
+        else:
+            template.run_gcode_from_command(ctx)
+
+    def compat_create_gcode_command(self, gcmd, command, commandline, params):
+        if hasattr(gcmd, "create_subcommand"):
+            return gcmd.create_subcommand(command, commandline, params)
+        else:
+            return self.gcode.create_gcode_command(command, commandline, params)
 
     # GCode command handlers
 
@@ -1345,7 +1509,7 @@ class BeaconProbe:
         self.multi_probe_begin()
         positions = []
         while len(positions) < sample_count:
-            pos = self._probe(speed, allow_faulty=allow_faulty)
+            pos = self._probe(speed, gcmd, allow_faulty=allow_faulty)
             positions.append(pos)
             self.toolhead.manual_move(liftpos, lift_speed)
         self.multi_probe_end()
@@ -1441,10 +1605,12 @@ class BeaconProbe:
                 self._sample_async()
                 self.toolhead.get_last_move_time()
                 pos = self.toolhead.get_position()
-                self.mcu_contact_probe.activate_gcode.run_gcode_from_command()
+                self.compat_template_run_gcode(
+                    self.mcu_contact_probe.activate_gcode, gcmd
+                )
                 try:
-                    hmove = HomingMove(
-                        self.printer, [(self.mcu_contact_probe, "contact")]
+                    hmove = self.compat_homing_move(
+                        self.printer, [(self.mcu_contact_probe, "contact")], gcmd
                     )
                     pos[2] = bottom
                     epos = hmove.homing_move(pos, speed, probe_pos=True)[:3]
@@ -1477,7 +1643,9 @@ class BeaconProbe:
                         )
                     raise
                 finally:
-                    self.mcu_contact_probe.deactivate_gcode.run_gcode_from_command()
+                    self.compat_template_run_gcode(
+                        self.mcu_contact_probe.deactivate_gcode, gcmd
+                    )
                     self.toolhead.manual_move([None, None, top], 100.0)
                     self.toolhead.wait_moves()
 
@@ -1519,12 +1687,17 @@ class BeaconProbe:
         gcode = self.printer.lookup_object("gcode")
 
         def set_max_accel(value):
-            gcode.run_script_from_command("SET_VELOCITY_LIMIT ACCEL=%.3f" % (value,))
+            script = "SET_VELOCITY_LIMIT ACCEL=%.3f" % (value,)
+            if hasattr(gcmd, "run_script"):
+                gcmd.run_script(script)
+            else:
+                gcode.run_script_from_command(script)
 
+        paired_homing_events = hasattr(probe, "ProbingContext")
         homing_state = BeaconHomingState()
-        self.printer.send_event("homing:home_rails_begin", homing_state, [])
-        self.mcu_contact_probe.activate_gcode.run_gcode_from_command()
         try:
+            self.printer.send_event("homing:home_rails_begin", homing_state, [])
+            self.compat_template_run_gcode(self.mcu_contact_probe.activate_gcode, gcmd)
             self.compat_toolhead_set_position_homing_z(self.toolhead, force_pos)
             skip_next = True
             retries = 0
@@ -1539,8 +1712,8 @@ class BeaconProbe:
                 self.toolhead.wait_moves()
                 set_max_accel(desired_accel)
                 try:
-                    hmove = HomingMove(
-                        self.printer, [(self.mcu_contact_probe, "contact")]
+                    hmove = self.compat_homing_move(
+                        self.printer, [(self.mcu_contact_probe, "contact")], gcmd
                     )
                     epos = hmove.homing_move(home_pos, speed, probe_pos=True)
                 except self.printer.command_error:
@@ -1593,15 +1766,23 @@ class BeaconProbe:
             self.toolhead.wait_moves()
             self.toolhead.flush_step_generation()
             self.last_probe_result = "ok"
-            self.printer.send_event("homing:home_rails_end", homing_state, [])
+            if not paired_homing_events:
+                homing_state.homing_successful = True
+                self.printer.send_event("homing:home_rails_end", homing_state, [])
             if gcmd.get_int("SKIP_MODEL_CREATION", 0) == 0:
                 self._calibrate(gcmd, force_pos, force_pos[2], True, True)
-
+            homing_state.homing_successful = True
         except self.printer.command_error:
             self.compat_kin_note_z_not_homed(kin)
             raise
         finally:
-            self.mcu_contact_probe.deactivate_gcode.run_gcode_from_command()
+            try:
+                if paired_homing_events:
+                    self.printer.send_event("homing:home_rails_end", homing_state, [])
+            finally:
+                self.compat_template_run_gcode(
+                    self.mcu_contact_probe.deactivate_gcode, gcmd
+                )
 
     cmd_BEACON_OFFSET_COMPARE_help = (
         "Measures offset between contact and proximity measurements"
@@ -1623,7 +1804,8 @@ class BeaconProbe:
 
         # Do contact move
         epos = self._run_probe_contact(
-            self.gcode.create_gcode_command(
+            self.compat_create_gcode_command(
+                gcmd,
                 "PROBE",
                 "PROBE",
                 params,
@@ -2104,10 +2286,189 @@ class StopStreaming(Exception):
     pass
 
 
+class BeaconProbeConfig:
+    def __init__(self, config, name, values):
+        self.config = config
+        self.name = name
+        self.values = values
+
+    def __getattr__(self, name):
+        return getattr(self.config, name)
+
+    def get_name(self):
+        return self.name
+
+    def get(self, option, *args, **kwargs):
+        if option in self.values:
+            return self.values[option]
+        return self.config.get(option, *args, **kwargs)
+
+    def getint(self, option, *args, **kwargs):
+        if option in self.values:
+            return int(self.values[option])
+        return self.config.getint(option, *args, **kwargs)
+
+    def getfloat(self, option, *args, **kwargs):
+        if option in self.values:
+            return float(self.values[option])
+        return self.config.getfloat(option, *args, **kwargs)
+
+    def getboolean(self, option, *args, **kwargs):
+        if option in self.values:
+            return bool(self.values[option])
+        return self.config.getboolean(option, *args, **kwargs)
+
+    def getchoice(self, option, choices, *args, **kwargs):
+        if option not in self.values:
+            return self.config.getchoice(option, choices, *args, **kwargs)
+        value = self.values[option]
+        if isinstance(choices, list):
+            return value
+        return choices[value]
+
+
+class BeaconDistanceCollector:
+    def __init__(self, beacon):
+        self.beacon = beacon
+        self.samples = []
+        self.stop_after = None
+        self.finished = False
+        self.completion = beacon.reactor.completion()
+        self.streaming = beacon.streaming_session(self._handle_sample, latency=1)
+
+    def _handle_sample(self, sample):
+        distance = sample.get("dist_raw")
+        if distance is None or not np.isfinite(distance):
+            distance = 99.0
+        self.samples.append(probe.ProbeDistanceResult(sample["time"], distance))
+        if self.stop_after is not None and sample["time"] >= self.stop_after:
+            self.completion.complete(True)
+
+    def finish(self, before_time):
+        if self.finished:
+            return []
+        self.finished = True
+        self.stop_after = before_time
+        try:
+            if not self.samples or self.samples[-1].time < before_time:
+                now = self.beacon.reactor.monotonic()
+                timeout = before_time - self.beacon._mcu.estimated_print_time(now) + 1.0
+                if self.completion.wait(now + timeout) is None:
+                    raise self.beacon.printer.command_error(
+                        "Timeout waiting for Beacon distance samples"
+                    )
+            return [sample for sample in self.samples if sample.time < before_time]
+        finally:
+            self.streaming.stop()
+
+    def sample_rate(self):
+        eventtime = self.beacon.reactor.monotonic()
+        deadline = eventtime + 1.0
+        while self.beacon._stream_sample_rate is None:
+            if eventtime >= deadline:
+                raise self.beacon.printer.command_error(
+                    "Unable to determine Beacon sample rate"
+                )
+            eventtime = self.beacon.reactor.pause(eventtime + 0.01)
+        return self.beacon._stream_sample_rate * 0.9
+
+
+class BeaconMCUProbe:
+    def __init__(self, beacon, endstop):
+        self.beacon = beacon
+        self.endstop = endstop
+        self.streaming = None
+
+    def __getattr__(self, name):
+        return getattr(self.endstop, name)
+
+    def probe_prepare(self, hmove):
+        pass
+
+    def probe_finish(self, hmove):
+        pass
+
+
+class BeaconProximityMCUProbe(BeaconMCUProbe):
+    def __init__(self, beacon):
+        super().__init__(beacon, beacon.mcu_probe)
+
+    def multi_probe_begin(self, *args):
+        if self.streaming is not None:
+            return
+        if self.beacon.model is None:
+            raise self.beacon.printer.command_error("No Beacon model loaded")
+        self.streaming = self.beacon.streaming_session(lambda sample: None)
+
+    def multi_probe_end(self):
+        if self.streaming is None:
+            return
+        self.streaming.stop()
+        self.streaming = None
+
+    def probing_move(self, pos, speed, gcmd):
+        allow_faulty = gcmd.get_int("ALLOW_FAULTY_COORDINATE", 0) != 0
+        return self.beacon._probe(
+            speed, gcmd, allow_faulty=allow_faulty, uncompensated=True
+        )
+
+    def begin_collect_distance(self):
+        return BeaconDistanceCollector(self.beacon)
+
+
+class BeaconContactMCUProbe(BeaconMCUProbe):
+    def __init__(self, beacon):
+        super().__init__(beacon, beacon.mcu_contact_probe)
+        self.per_point_hooks = False
+
+    def multi_probe_begin(self, *args):
+        if self.streaming is not None:
+            return
+        context = args[0] if args else False
+        self.per_point_hooks = not getattr(context, "always_restore_toolhead", context)
+        streaming = self.beacon.streaming_session(lambda sample: None)
+        gcmd = None
+        if len(args) >= 1 and hasattr(args[0], "gcmd"):
+            gcmd = args[0].gcmd
+        try:
+            if not self.per_point_hooks:
+                self.beacon.compat_template_run_gcode(self.endstop.activate_gcode, gcmd)
+        except Exception:
+            streaming.stop()
+            raise
+        self.streaming = streaming
+
+    def multi_probe_end(self, *args):
+        if self.streaming is None:
+            return
+        streaming, self.streaming = self.streaming, None
+        gcmd = None
+        if len(args) >= 1 and hasattr(args[0], "gcmd"):
+            gcmd = args[0].gcmd
+        try:
+            if not self.per_point_hooks:
+                self.beacon.compat_template_run_gcode(
+                    self.endstop.deactivate_gcode, gcmd
+                )
+        finally:
+            self.per_point_hooks = False
+            streaming.stop()
+
+    def probing_move(self, pos, speed, gcmd):
+        if speed > self.beacon.autocal_max_speed:
+            raise gcmd.error(
+                "PROBE_SPEED must not exceed %.3f" % (self.beacon.autocal_max_speed,)
+            )
+        return self.beacon._probe_contact(speed, gcmd, uncompensated=True)
+
+
 class BeaconProbeWrapper:
     def __init__(self, beacon):
         self.beacon = beacon
         self.results = None
+        self.probe_name = "beacon"
+        if not beacon.id.is_unnamed():
+            self.probe_name += "_" + beacon.id.name
 
     def multi_probe_begin(self):
         return self.beacon.multi_probe_begin()
@@ -2258,6 +2619,8 @@ class BeaconEndstopWrapper:
         self.is_homing = False
 
     def _handle_home_rails_end(self, homing_state, rails):
+        if not getattr(homing_state, "homing_successful", True):
+            return
         if self.beacon.model is None:
             return
 
@@ -2521,11 +2884,11 @@ class BeaconHomingHelper:
                 toolhead.manual_move(move, self.z_hop_speed)
                 toolhead.wait_moves()
 
-    def _run_hook(self, template, params, raw_params):
+    def _run_hook(self, template, params, raw_params, gcmd):
         ctx = template.create_template_context()
         ctx["params"] = params
         ctx["rawparams"] = raw_params
-        template.run_gcode_from_command(ctx)
+        self.beacon.compat_template_run_gcode(template, gcmd, ctx)
 
     def cmd_G28(self, gcmd):
         toolhead = self.beacon.printer.lookup_object("toolhead")
@@ -2540,26 +2903,30 @@ class BeaconHomingHelper:
             want_x = want_y = want_z = True
 
         if want_x or want_y:
-            self._run_hook(self.tmpl_pre_xy, orig_params, raw_params)
+            self._run_hook(self.tmpl_pre_xy, orig_params, raw_params, gcmd)
             if self.home_y_before_x:
                 axis_order = "yx"
             else:
                 axis_order = "xy"
             for axis in axis_order:
                 if axis == "x" and want_x:
-                    self._run_hook(self.tmpl_pre_x, orig_params, raw_params)
-                    cmd = self.gcode.create_gcode_command("G28", "G28", {"X": "0"})
+                    self._run_hook(self.tmpl_pre_x, orig_params, raw_params, gcmd)
+                    cmd = self.beacon.compat_create_gcode_command(
+                        gcmd, "G28", "G28", {"X": "0"}
+                    )
                     self.prev_gcmd(cmd)
-                    self._run_hook(self.tmpl_post_x, orig_params, raw_params)
+                    self._run_hook(self.tmpl_post_x, orig_params, raw_params, gcmd)
                 elif axis == "y" and want_y:
-                    self._run_hook(self.tmpl_pre_y, orig_params, raw_params)
-                    cmd = self.gcode.create_gcode_command("G28", "G28", {"Y": "0"})
+                    self._run_hook(self.tmpl_pre_y, orig_params, raw_params, gcmd)
+                    cmd = self.beacon.compat_create_gcode_command(
+                        gcmd, "G28", "G28", {"Y": "0"}
+                    )
                     self.prev_gcmd(cmd)
-                    self._run_hook(self.tmpl_post_y, orig_params, raw_params)
-            self._run_hook(self.tmpl_post_xy, orig_params, raw_params)
+                    self._run_hook(self.tmpl_post_y, orig_params, raw_params, gcmd)
+            self._run_hook(self.tmpl_post_xy, orig_params, raw_params, gcmd)
 
         if want_z:
-            self._run_hook(self.tmpl_pre_z, orig_params, raw_params)
+            self._run_hook(self.tmpl_pre_z, orig_params, raw_params, gcmd)
             curtime = self.beacon.reactor.monotonic()
             kin = toolhead.get_kinematics()
             kin_status = kin.get_status(curtime)
@@ -2612,21 +2979,26 @@ class BeaconHomingHelper:
                 params = {}
                 if not calibrate:
                     params["SKIP_MODEL_CREATION"] = "1"
-                cmd = self.gcode.create_gcode_command(cmd, cmd, params)
+                cmd = self.beacon.compat_create_gcode_command(gcmd, cmd, cmd, params)
                 self.beacon.cmd_BEACON_AUTO_CALIBRATE(cmd)
             elif method == HOMING_AUTOCAL_METHOD_PROXIMITY:
                 pos[0] -= self.beacon.x_offset
                 pos[1] -= self.beacon.y_offset
                 toolhead.manual_move(pos, self.xy_move_speed)
-                cmd = self.gcode.create_gcode_command("G28", "G28", {"Z": "0"})
+                cmd = self.beacon.compat_create_gcode_command(
+                    gcmd, "G28", "G28", {"Z": "0"}
+                )
                 self.prev_gcmd(cmd)
             else:
                 raise gcmd.error("Invalid homing method '%s'" % (method,))
             self._maybe_zhop(toolhead)
-            self._run_hook(self.tmpl_post_z, orig_params, raw_params)
+            self._run_hook(self.tmpl_post_z, orig_params, raw_params, gcmd)
 
 
 class BeaconHomingState:
+    def __init__(self):
+        self.homing_successful = False
+
     def get_axes(self):
         return [2]
 
@@ -2766,6 +3138,34 @@ class BeaconMeshHelper:
         probe_method = gcmd.get(
             "PROBE_METHOD", self.beacon.default_probe_method
         ).lower()
+        if hasattr(probe, "ProbeList"):
+            params = gcmd.get_command_parameters()
+            if "PROBE" not in params and "PROBE_METHOD" in params:
+                selected = {
+                    "proximity": self.beacon.registered_probe_proximity,
+                    "contact": self.beacon.registered_probe_contact,
+                }.get(probe_method)
+                if selected is None:
+                    raise gcmd.error(
+                        "Invalid PROBE_METHOD, valid choices: proximity, contact"
+                    )
+                params = dict(params, PROBE=selected.probe_name)
+                gcmd = self.beacon.compat_create_gcode_command(
+                    gcmd,
+                    gcmd.get_command(),
+                    gcmd.get_commandline() + " PROBE=" + selected.probe_name,
+                    params,
+                )
+
+            selected = probe.ProbeList.get_list(self.beacon.printer).get_command_probe(
+                gcmd, None
+            )
+            if getattr(selected, "beacon", None) is not self.beacon:
+                if hasattr(self.bm.bmc, "zero_ref_pos"):
+                    self.bm.bmc.zero_ref_pos = self.zero_ref_pos
+                self.prev_gcmd(gcmd)
+                return
+            probe_method = selected.method
         if probe_method != "proximity":
             method = "automatic"
         if method == "beacon":
@@ -2790,7 +3190,8 @@ class BeaconMeshHelper:
                     extra_params["MESH_MAX"] = ",".join(map(str, self.def_contact_max))
                 if extra_params:
                     extra_params.update(params)
-                    gcmd = self.gcode.create_gcode_command(
+                    gcmd = self.beacon.compat_create_gcode_command(
+                        gcmd,
                         gcmd.get_command(),
                         gcmd.get_commandline()
                         + "".join([" " + k + "=" + v for k, v in extra_params.items()]),
@@ -3844,10 +4245,31 @@ class BeaconTracker:
     def register_gcode_command(self, sensor, cmd, func, desc):
         if cmd not in self.gcodes:
             handlers = self.gcodes[cmd] = {}
-            self.gcode.register_command(
-                cmd, lambda gcmd: self.dispatch_gcode(handlers, gcmd), desc=desc
-            )
+            if hasattr(probe, "ProbeList") and cmd in (
+                "PROBE",
+                "PROBE_ACCURACY",
+                "Z_OFFSET_APPLY_PROBE",
+            ):
+                native = self.gcode.register_command(cmd, None)
+                dispatch = partial(self.dispatch_probe_gcode, handlers, native)
+            else:
+                dispatch = partial(self.dispatch_gcode, handlers)
+            self.gcode.register_command(cmd, dispatch, desc=desc)
         self.gcodes[cmd][sensor] = func
+
+    def dispatch_probe_gcode(self, handlers, native, gcmd):
+        params = gcmd.get_command_parameters()
+        if "PROBE" in params:
+            native(gcmd)
+        elif "SENSOR" in params or "PROBE_METHOD" in params:
+            self.dispatch_gcode(handlers, gcmd)
+        else:
+            default = probe.ProbeList.get_list(self.printer).get_default_probe()
+            beacon = getattr(default, "beacon", None)
+            if beacon is not None and beacon.id.name in handlers:
+                handlers[beacon.id.name](gcmd)
+            else:
+                native(gcmd)
 
     def dispatch_gcode(self, handlers, gcmd):
         sensor = gcmd.get("SENSOR", "")
